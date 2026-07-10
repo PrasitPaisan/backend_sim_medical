@@ -29,6 +29,17 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-floating-promises': 'warn',
       '@typescript-eslint/no-unsafe-argument': 'warn',
+      // These four fire on every property access into an `any`-typed value
+      // (prescription?.mzno, detail?.medhisid, ...) — this codebase leans on
+      // `any` deliberately for loosely-typed HIS/machine payloads, so keeping
+      // these at 'error' just floods the editor with red squiggles for
+      // intentional, working code rather than real bugs. Downgraded to
+      // 'warn' to match no-unsafe-argument above; tsc (the actual compiler)
+      // is unaffected either way.
+      '@typescript-eslint/no-unsafe-assignment': 'warn',
+      '@typescript-eslint/no-unsafe-member-access': 'warn',
+      '@typescript-eslint/no-unsafe-call': 'warn',
+      '@typescript-eslint/no-unsafe-return': 'warn',
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
