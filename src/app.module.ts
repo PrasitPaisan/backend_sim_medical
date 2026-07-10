@@ -6,6 +6,7 @@ import { MedicinesModule } from './medicines/medicines.module';
 import { PrescriptionsModule } from './prescriptions/prescriptions.module';
 import { BasketsModule } from './baskets/baskets.module';
 import { DepartmentsModule } from './departments/departments.module';
+import { MachineModule } from './machine/machine.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { DepartmentsModule } from './departments/departments.module';
     PrescriptionsModule,
     BasketsModule,
     DepartmentsModule,
+    MachineModule,
   ],
   controllers: [AppController],
   providers: [AppService],
