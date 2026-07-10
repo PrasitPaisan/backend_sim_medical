@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool, PoolClient } from 'pg';
+import { createPool } from '../common/db.util';
 
 // Mirrors frontend_sim/src/lib/stations.ts PIPELINE_STATIONS — kept as local
 // constants since the two apps don't share code.
@@ -22,13 +23,7 @@ export class BasketsService implements OnModuleDestroy {
   private pool: Pool;
 
   constructor(private config: ConfigService) {
-    this.pool = new Pool({
-      host: this.config.get<string>('DB_HOST') ?? 'localhost',
-      port: Number(this.config.get<number>('DB_PORT') ?? 5432),
-      user: this.config.get<string>('DB_USER') ?? 'postgres',
-      password: this.config.get<string>('DB_PASSWORD') ?? 'postgres',
-      database: this.config.get<string>('DB_NAME') ?? 'electronic_shell',
-    });
+    this.pool = createPool(this.config);
   }
 
   // Joined with prescription info so callers (Machine Sim's per-station

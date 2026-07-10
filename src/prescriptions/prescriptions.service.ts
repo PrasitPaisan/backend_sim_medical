@@ -7,6 +7,7 @@ import {
   getMachineTarget,
   parseMachineResult,
 } from '../common/soap.util';
+import { createPool } from '../common/db.util';
 import { BasketsService } from '../baskets/baskets.service';
 
 @Injectable()
@@ -17,13 +18,7 @@ export class PrescriptionsService implements OnModuleDestroy {
     private config: ConfigService,
     private basketsService: BasketsService,
   ) {
-    this.pool = new Pool({
-      host: this.config.get<string>('DB_HOST') ?? 'localhost',
-      port: Number(this.config.get<number>('DB_PORT') ?? 5432),
-      user: this.config.get<string>('DB_USER') ?? 'postgres',
-      password: this.config.get<string>('DB_PASSWORD') ?? 'postgres',
-      database: this.config.get<string>('DB_NAME') ?? 'electronic_shell',
-    });
+    this.pool = createPool(this.config);
   }
   // ------------------------------------
   //   DB Prescription
