@@ -24,7 +24,15 @@ Raw `pg` (no ORM) — the database schema lives in Postgres itself, not in migra
    - `MACHINE_PATH_RB1500` / `MACHINE_PATH_NZP360` — the physical dispensing machines' SOAP endpoints. Leaving these unset does not crash the server, but any call that sends to a machine (medicines, prescriptions, department sync, machine status) will report failure.
    - `PORT` — the port this API listens on (the frontend's `VITE_API_BASE_URL` must match this).
 
-3. **Database schema.** This repo does not ship a from-scratch schema bootstrap — the core tables (`prescription_header`, `prescription_detail`, `medicine_dictionary`, `basket`) are expected to already exist in the target database (ask whoever owns the project for the current schema). Once those tables exist, apply this repo's own SQL files **in this order**:
+3. **Database schema.**
+
+   **Fresh/empty database (e.g. a new Supabase project):** run `schema.sql` once — it creates every table this app uses (`prescription_header`, `prescription_detail`, `medicine_dictionary`, `basket`, `department_dictionary`, plus a few reserved-for-later tables) and seeds the basket pool, in one shot:
+   ```bash
+   psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f schema.sql
+   ```
+   (On Supabase: paste its contents into the SQL Editor and run it instead.)
+
+   **Existing database that predates `schema.sql`** (already has `prescription_header`/`prescription_detail`/`medicine_dictionary`/`basket`): apply these three incremental files **in this order** instead:
    ```bash
    psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f create-department-dictionary.sql      # creates department_dictionary
    psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f add-nzp360-prescription-columns.sql    # adds NZP360-only columns to prescription_header/prescription_detail
