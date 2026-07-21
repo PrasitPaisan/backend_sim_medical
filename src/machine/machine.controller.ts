@@ -7,21 +7,20 @@ import {
   Query,
 } from '@nestjs/common';
 import { MachineService } from './machine.service';
+import { BasketsService } from '../baskets/baskets.service';
 
 @Controller('machine')
 export class MachineController {
-  constructor(private readonly machineService: MachineService) {}
+  constructor(
+    private readonly machineService: MachineService,
+    private readonly basketsService: BasketsService,
+  ) {}
 
-  // Returns the HIS ids of prescriptions the robot has already finished
-  // dispensing (ready for pharmacist pickup/recheck) — read-only against the
-  // machine, no database reads or writes here.
   @Get('query-ready')
   async queryReady() {
     return this.machineService.queryReadyPrescriptionsFromRB1500();
   }
 
-  // Asks the machine for basket info by identifier (str) and query type
-  // (type) — read-only against the machine, no database reads or writes here.
   @Get('query-basket')
   async queryBasket(@Query('str') str?: string, @Query('type') type?: string) {
     if (!str || !type) {
@@ -31,8 +30,6 @@ export class MachineController {
     return await this.machineService.queryBasketFromRB1500(str, type);
   }
 
-  // Asks RB1500 for its own machine status — read-only against the machine,
-  // no database reads or writes here.
   @Get('status')
   async getMachineStatus(@Query('machineId') machineId?: string) {
     if (!machineId) {
@@ -44,9 +41,6 @@ export class MachineController {
     );
   }
 
-  // Tells the machine a prescription's pharmacist recheck is complete — a
-  // real machine mutation (clears it from the machine's own ready queue), so
-  // this is POST, unlike query-ready. Not wired into advance-station yet.
   @Post('update-ready-state')
   async updateReadyState(@Body() body: { prescriptionhisid?: string }) {
     const { prescriptionhisid } = body ?? {};
@@ -60,8 +54,13 @@ export class MachineController {
     );
   }
 
-  // Tells the machine to eliminate/cancel a prescription it's holding — a
-  // real machine mutation, so POST. Machine-only for now, no database writes.
+  // Real machine mutation, so POST. Once the machine confirms the
+  // elimination, releases whatever basket was bound to this prescription
+  // back to the pool for reuse and marks it eliminated (pre_state = 2 —
+  // see BasketsService.eliminateByPrescriptionHisId) so it stops showing up
+  // as "complete" and drops out of every existing queue view. If the
+  // machine call itself fails, the database is left untouched — nothing
+  // was actually eliminated on the real machine.
   @Post('eliminate-prescription')
   async eliminatePrescription(@Body() body: { prescriptionhisid?: string }) {
     const { prescriptionhisid } = body ?? {};
@@ -70,8 +69,21 @@ export class MachineController {
       throw new BadRequestException('prescriptionhisid is required');
     }
 
-    return await this.machineService.execEliminatePrescriptionOnRB1500(
-      prescriptionhisid,
-    );
+    const machineResult =
+      await this.machineService.execEliminatePrescriptionOnRB1500(
+        prescriptionhisid,
+      );
+
+    if (!machineResult.ok) {
+      return machineResult;
+    }
+
+    const releaseResult =
+      await this.basketsService.eliminateByPrescriptionHisId(prescriptionhisid);
+
+    return {
+      ...machineResult,
+      basketReleased: releaseResult.ok ? releaseResult.basketId : null,
+    };
   }
 }

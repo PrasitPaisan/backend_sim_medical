@@ -19,9 +19,36 @@ export class PrescriptionsController {
 
   // Received, not yet sent (pre_state = -1) — Prescription Managements.
   @Get()
-  async list(@Query('limit') limit?: string) {
+  async list(
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.prescriptionsService.findAll(
+      page ? Number(page) : 1,
+      pageSize ? Number(pageSize) : 50,
+    );
+  }
+
+  // Bulk-select support for Prescription Managements: returns just the ids
+  // of the first `limit` prescriptions in the same order findAll uses, so
+  // the UI can select e.g. "first 100" across pages without fetching every
+  // prescription's full medicine details.
+  @Get('ids')
+  async ids(@Query('limit') limit?: string) {
     const parsedLimit = limit ? Number(limit) : 100;
-    return this.prescriptionsService.findAll(parsedLimit);
+    return this.prescriptionsService.findIds(parsedLimit);
+  }
+
+  // Backfills full prescription + medicine data for ids the browser doesn't
+  // have loaded (e.g. selected via the "first N" bulk-select on a page other
+  // than the one currently displayed) — send-batch needs the full medicine
+  // list to build the SOAP payload, not just the id.
+  @Post('by-ids')
+  async byIds(@Body() body: { ids?: number[] }) {
+    const ids = Array.isArray(body?.ids)
+      ? body.ids.filter((id) => Number.isFinite(id))
+      : [];
+    return this.prescriptionsService.findByIds(ids);
   }
 
   // In progress (pre_state = 0), joined with each bound basket's station_status

@@ -7,6 +7,7 @@ import {
   getMachineTarget,
   parseMachineResult,
 } from '../common/soap.util';
+import { createPool } from '../common/db.util';
 import { BasketsService } from '../baskets/baskets.service';
 
 @Injectable()
@@ -17,13 +18,7 @@ export class PrescriptionsService implements OnModuleDestroy {
     private config: ConfigService,
     private basketsService: BasketsService,
   ) {
-    this.pool = new Pool({
-      host: this.config.get<string>('DB_HOST') ?? 'localhost',
-      port: Number(this.config.get<number>('DB_PORT') ?? 5432),
-      user: this.config.get<string>('DB_USER') ?? 'postgres',
-      password: this.config.get<string>('DB_PASSWORD') ?? 'postgres',
-      database: this.config.get<string>('DB_NAME') ?? 'electronic_shell',
-    });
+    this.pool = createPool(this.config);
   }
   // ------------------------------------
   //   DB Prescription
@@ -31,7 +26,131 @@ export class PrescriptionsService implements OnModuleDestroy {
 
   // pre_state now only has 3 meanings: -1 received, 0 in progress, 1 complete.
   // Station-level progress lives on the bound basket (see findInProgress).
-  async findAll(limit = 100) {
+  //
+  // Paginated rather than a single capped LIMIT — Prescription Managements
+  // can realistically hold thousands of received prescriptions, and loading/
+  // rendering all of them at once is what makes that page feel slow (see
+  // findIds below for the companion bulk-select endpoint). COUNT(*) OVER()
+  // is evaluated after GROUP BY but before LIMIT/OFFSET, so it reports the
+  // total prescription count unaffected by pagination — one round trip
+  // instead of a separate COUNT query.
+  async findAll(page = 1, pageSize = 50) {
+    const safePage = Math.max(1, page);
+    const safePageSize = Math.min(200, Math.max(1, pageSize));
+    const offset = (safePage - 1) * safePageSize;
+
+    const res = await this.pool.query(
+      `
+        SELECT
+          ph.id,
+          ph.mzno,
+          ph.patientname,
+          ph.patientage,
+          ph.patientsex,
+          ph.prescriptionhisid,
+          ph.prescriptiondoctorname,
+          ph.departmentname,
+          ph.fetchwindow,
+          ph.pre_state,
+          ph.created_at,
+          ph.updated_at,
+          ph.patientbirthday,
+          ph.patientvisitid,
+          ph.patientbed,
+          ph.doctorid,
+          ph.administration,
+          ph.repeatindicator,
+          ph.deptcode,
+          COUNT(*) OVER() AS total_count,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'id', pd.id,
+                'medhisid', pd.medhisid,
+                'medunit', pd.medunit,
+                'medicinenum', pd.medicinenum,
+                'medicineheteromorphism', pd.medicineheteromorphism,
+                'medicinehint', pd.medicinehint,
+                'medicinenamech', pd.medicinenamech,
+                'medfactoryid', pd.medfactoryid,
+                'medfactoryname', pd.medfactoryname,
+                'typeunit', md.typeunit,
+                'hpmtypeunit', md.hpmtypeunit,
+                'dispense_type', md.dispense_type,
+                'drugspec', pd.drugspec,
+                'drugpycode', pd.drugpycode,
+                'dosage', pd.dosage,
+                'dosageunit', pd.dosageunit,
+                'dosageperunit', pd.dosageperunit,
+                'dispensingtime', pd.dispensingtime,
+                'performtime', pd.performtime,
+                'performfreqdetail', pd.performfreqdetail,
+                'performfreq', pd.performfreq,
+                'performfreqprint', pd.performfreqprint,
+                'nursingcode', pd.nursingcode,
+                'priority', pd.priority
+              )
+            ) FILTER (WHERE pd.id IS NOT NULL),
+            '[]'
+          ) AS details
+        FROM prescription_header ph
+        LEFT JOIN prescription_detail pd ON pd.prescription_id = ph.id
+        -- "Type" lives on the medicine catalog, not the prescription line
+        -- item — join it in rather than duplicating it into prescription_detail.
+        LEFT JOIN medicine_dictionary md
+          ON md.medicinehisid = pd.medhisid
+          AND md.medicineunit = pd.medunit
+          AND md.medfactoryname = pd.medfactoryname
+        WHERE ph.pre_state = -1
+        GROUP BY ph.id
+        -- Stat order (priority = 2, see frontend_sim/src/lib/priority.ts
+        -- URGENCY_ORDER) on any line item outranks everything else and
+        -- floats to the top; otherwise newest-created first.
+        ORDER BY BOOL_OR(pd.priority = 2) DESC, ph.id DESC
+        LIMIT $1 OFFSET $2
+      `,
+      [safePageSize, offset],
+    );
+
+    const total = res.rows.length > 0 ? Number(res.rows[0].total_count) : 0;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const items = res.rows.map(({ total_count, ...row }) => row);
+
+    return { items, total, page: safePage, pageSize: safePageSize };
+  }
+
+  // Companion to findAll's pagination: lets the UI bulk-select "the first N"
+  // prescriptions (e.g. 100 of 2000) without pulling every medicine line
+  // item for rows that aren't even on the current page — same ordering as
+  // findAll (Stat first, then newest) so "first N" matches what's visibly
+  // at the top of the list.
+  async findIds(limit = 100) {
+    const safeLimit = Math.min(2000, Math.max(1, limit));
+
+    const res = await this.pool.query(
+      `
+        SELECT ph.id
+        FROM prescription_header ph
+        LEFT JOIN prescription_detail pd ON pd.prescription_id = ph.id
+        WHERE ph.pre_state = -1
+        GROUP BY ph.id
+        ORDER BY BOOL_OR(pd.priority = 2) DESC, ph.id DESC
+        LIMIT $1
+      `,
+      [safeLimit],
+    );
+
+    return res.rows.map((row) => row.id as number);
+  }
+
+  // Fetches full prescription + medicine details for an arbitrary set of
+  // ids, ignoring pagination — needed because "select first N" (findIds
+  // above) can select prescriptions that aren't on the page currently
+  // loaded in the browser, so send-batch has to backfill their full data
+  // before it can build the SOAP payload.
+  async findByIds(ids: number[]) {
+    if (ids.length === 0) return [];
+
     const res = await this.pool.query(
       `
         SELECT
@@ -79,26 +198,24 @@ export class PrescriptionsService implements OnModuleDestroy {
                 'performfreqdetail', pd.performfreqdetail,
                 'performfreq', pd.performfreq,
                 'performfreqprint', pd.performfreqprint,
-                'nursingcode', pd.nursingcode
+                'nursingcode', pd.nursingcode,
+                'priority', pd.priority
               )
             ) FILTER (WHERE pd.id IS NOT NULL),
             '[]'
           ) AS details
         FROM prescription_header ph
         LEFT JOIN prescription_detail pd ON pd.prescription_id = ph.id
-        -- "Type" lives on the medicine catalog, not the prescription line
-        -- item — join it in rather than duplicating it into prescription_detail.
         LEFT JOIN medicine_dictionary md
           ON md.medicinehisid = pd.medhisid
           AND md.medicineunit = pd.medunit
           AND md.medfactoryname = pd.medfactoryname
-        WHERE ph.pre_state = -1
+        WHERE ph.id = ANY($1) AND ph.pre_state = -1
         GROUP BY ph.id
-        ORDER BY ph.id DESC
-        LIMIT $1
       `,
-      [limit],
+      [ids],
     );
+
     return res.rows;
   }
 
@@ -158,7 +275,8 @@ export class PrescriptionsService implements OnModuleDestroy {
                 'performfreqdetail', pd.performfreqdetail,
                 'performfreq', pd.performfreq,
                 'performfreqprint', pd.performfreqprint,
-                'nursingcode', pd.nursingcode
+                'nursingcode', pd.nursingcode,
+                'priority', pd.priority
               )
             ) FILTER (WHERE pd.id IS NOT NULL),
             '[]'
@@ -278,8 +396,8 @@ export class PrescriptionsService implements OnModuleDestroy {
               `
               INSERT INTO prescription_detail
                 (prescription_id, prescriptionhisid, medhisid, medunit, medicinenum, medicineheteromorphism, medicinehint, medfactoryid, medfactoryname, medicinenamech,
-                 drugspec, drugpycode, dosage, dosageunit, dosageperunit, dispensingtime, performtime, performfreqdetail, performfreq, performfreqprint, nursingcode)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                 drugspec, drugpycode, dosage, dosageunit, dosageperunit, dispensingtime, performtime, performfreqdetail, performfreq, performfreqprint, nursingcode, priority)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
               `,
               [
                 prescriptionId,
@@ -304,6 +422,7 @@ export class PrescriptionsService implements OnModuleDestroy {
                 item?.performfreq ?? null,
                 item?.performfreqprint ?? null,
                 item?.nursingcode ?? null,
+                Number(item?.priority ?? 4),
               ],
             );
           }
@@ -420,6 +539,7 @@ export class PrescriptionsService implements OnModuleDestroy {
 
         // The machine replies HTTP 200 even on failure — the real outcome is in the body.
         const responseText = await response.text();
+        console.log('RB1500 SendPrescription response:', responseText);
         const machineResult = parseMachineResult(responseText);
         const rb1500Ok = response.ok && machineResult.success;
 
@@ -463,6 +583,7 @@ export class PrescriptionsService implements OnModuleDestroy {
             });
 
             const nzp360ResponseText = await nzp360Response.text();
+            console.log('NZP360 SendPrescription response:', nzp360ResponseText);
             const nzp360MachineResult = parseMachineResult(nzp360ResponseText);
             nzp360Ok = nzp360Response.ok && nzp360MachineResult.success;
             if (!nzp360Ok) {

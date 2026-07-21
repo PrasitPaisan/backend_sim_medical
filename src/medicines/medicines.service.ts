@@ -7,6 +7,7 @@ import {
   getMachineTarget,
   parseMachineResult,
 } from '../common/soap.util';
+import { createPool } from '../common/db.util';
 
 export type MedicineInput = {
   medicinehisid: string;
@@ -43,13 +44,7 @@ export class MedicinesService implements OnModuleDestroy {
   private pool: Pool;
 
   constructor(private config: ConfigService) {
-    this.pool = new Pool({
-      host: this.config.get<string>('DB_HOST') ?? 'localhost',
-      port: Number(this.config.get<number>('DB_PORT') ?? 5432),
-      user: this.config.get<string>('DB_USER') ?? 'postgres',
-      password: this.config.get<string>('DB_PASSWORD') ?? 'postgres',
-      database: this.config.get<string>('DB_NAME') ?? 'electronic_shell',
-    });
+    this.pool = createPool(this.config);
   }
 
   // ------------------------------------
@@ -71,8 +66,8 @@ export class MedicinesService implements OnModuleDestroy {
     const res = await this.pool.query(
       `
       INSERT INTO medicine_dictionary
-        (medicinehisid, medicinenamech, medicinenameen, medicineunit, medicinestate, medfactoryid, medfactoryname, typeunit, hpmtypeunit, numcode, pycode, boxmaxnum, medposition, med_batch, validate_time, dispense_type)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        (medicinehisid, medicinenamech, medicinenameen, medicineunit, medicinestate, medfactoryid, medfactoryname, typeunit, hpmtypeunit, numcode, pycode, boxmaxnum, medposition, med_batch, validate_time, dispense_type, med_unit_capacity)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       ON CONFLICT (medicinehisid, medicineunit, medfactoryname) DO UPDATE SET
         medicinenamech = EXCLUDED.medicinenamech,
         medicinenameen = EXCLUDED.medicinenameen,
@@ -87,6 +82,7 @@ export class MedicinesService implements OnModuleDestroy {
         med_batch = EXCLUDED.med_batch,
         validate_time = EXCLUDED.validate_time,
         dispense_type = EXCLUDED.dispense_type,
+        med_unit_capacity = EXCLUDED.med_unit_capacity,
         updated_at = NOW()
       RETURNING *
       `,
@@ -107,6 +103,7 @@ export class MedicinesService implements OnModuleDestroy {
         medicine.med_batch ?? null,
         medicine.validate_time ?? null,
         medicine.dispense_type ?? 'manual',
+        medicine.med_unit_capacity ?? null,
       ],
     );
     return res.rows[0];
@@ -146,6 +143,7 @@ export class MedicinesService implements OnModuleDestroy {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('RB1500 SendMedicine response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {
@@ -170,9 +168,11 @@ export class MedicinesService implements OnModuleDestroy {
   }
 
   // Structure confirmed working against the real machine: the inner CDATA
-  // payload is <medicine><itmlist><changemed>...</changemed></itmlist></medicine>,
-  // with field names matching our own medicine_dictionary columns 1:1 — no
-  // translation needed here, unlike the earlier DocumentElement/DataTable shape.
+  // payload is <medicine><itmlist><changemed>...</changemed></itmlist></medicine>
+  // inside a SOAP 1.2 envelope — the machine's own field names are
+  // medbatch/validatetime (no underscore) plus a desc_code tag with no
+  // backing DB column, which is why those three don't map 1:1 to
+  // medicine_dictionary like the rest do.
   private buildSoapEnvelopeForSendMedicineRB1500(
     medicines: MedicineInput[],
   ): string {
@@ -193,18 +193,19 @@ export class MedicinesService implements OnModuleDestroy {
                 <pycode>${escapeXml(medicine.pycode)}</pycode>
                 <boxmaxnum>${escapeXml(medicine.boxmaxnum ?? 1)}</boxmaxnum>
                 <medposition>${escapeXml(medicine.medposition ?? '')}</medposition>
-                <med_batch>${escapeXml(medicine.med_batch ?? '')}</med_batch>
-                <validate_time>${escapeXml(medicine.validate_time ?? '')}</validate_time>
+                <desc_code></desc_code>
+                <medbatch>${escapeXml(medicine.med_batch ?? '')}</medbatch>
+                <validatetime>${escapeXml(medicine.validate_time ?? '')}</validatetime>
                 </changemed>`,
       )
       .join('');
 
     const medicineXml = `
-            <medicine>
-            <itmlist>${changemedXml}
-            </itmlist>
-            </medicine>
-      `;
+<medicine>
+ <itmlist>${changemedXml}
+ </itmlist>
+</medicine>
+`;
     return `<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
@@ -251,6 +252,7 @@ export class MedicinesService implements OnModuleDestroy {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('NZP360 SendMedicine response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {

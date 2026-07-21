@@ -50,6 +50,7 @@ export class MachineService {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('RB1500 QueryReadyPrescription response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       const readyPrescriptionHisIds = machineResult.innerXml
@@ -120,6 +121,7 @@ export class MachineService {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('RB1500 QueryBasket response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {
@@ -190,6 +192,7 @@ export class MachineService {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('RB1500 GetMachineStatus response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {
@@ -290,6 +293,7 @@ export class MachineService {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('RB1500 UpdateReadyPrescriptionState response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {
@@ -363,6 +367,7 @@ export class MachineService {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('RB1500 ExecEliminatePrescription response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {
