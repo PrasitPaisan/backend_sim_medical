@@ -10,7 +10,9 @@ import { Pool } from 'pg';
 // aren't in Node's default trust store — this still encrypts the
 // connection, it just doesn't verify the server cert chain.
 export function createPool(config: ConfigService): Pool {
-  const sslEnabled = ['true', '1'].includes((config.get<string>('DB_SSL') ?? '').toLowerCase());
+  const sslEnabled = ['true', '1'].includes(
+    (config.get<string>('DB_SSL') ?? '').toLowerCase(),
+  );
 
   return new Pool({
     host: config.get<string>('DB_HOST') ?? 'localhost',

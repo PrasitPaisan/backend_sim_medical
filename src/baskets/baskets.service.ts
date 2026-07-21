@@ -12,11 +12,20 @@ import { createPool } from '../common/db.util';
 const RECHECK_STATION_STATUS = 6;
 const FINAL_STATION_STATUS = 8;
 
+// A prescription the machine eliminated/cancelled — deliberately distinct
+// from -1 (received)/0 (in progress)/1 (complete) so it disappears from
+// every existing queue view (Prescription Managements only shows -1,
+// Process Tracking only shows 0/1) instead of masquerading as "complete".
+export const ELIMINATED_PRE_STATE = 2;
+
 export type AdvanceStationResult =
   | { ok: true; basketId: string; stationStatus: number }
   | { ok: false; reason: 'not_found' }
   | { ok: false; reason: 'no_basket_bound' }
   | { ok: false; reason: 'wrong_state'; currentStatus: number };
+
+export type EliminateResult =
+  { ok: true; basketId: string | null } | { ok: false; reason: 'not_found' };
 
 @Injectable()
 export class BasketsService implements OnModuleDestroy {
@@ -155,6 +164,54 @@ export class BasketsService implements OnModuleDestroy {
 
       await client.query('COMMIT');
       return { ok: true, basketId, stationStatus: newStatus };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Called after the real machine confirms ExecEliminatePrescription
+  // succeeded (see MachineController.eliminatePrescription) — releases
+  // whatever basket was bound to this prescription back to the pool for
+  // reuse and marks the prescription eliminated. Works whether or not a
+  // basket was actually bound (a still-unsent prescription can be
+  // eliminated too), so basketId in the result can be null.
+  async eliminateByPrescriptionHisId(
+    prescriptionhisid: string,
+  ): Promise<EliminateResult> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const headerRes = await client.query(
+        `SELECT id, basket_id FROM prescription_header WHERE prescriptionhisid = $1`,
+        [prescriptionhisid],
+      );
+
+      if (headerRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
+      }
+
+      const { id: prescriptionId, basket_id: basketId } = headerRes.rows[0];
+
+      if (basketId) {
+        await client.query(
+          `UPDATE basket SET prescription_id = NULL, station_status = 0, updated_at = NOW() WHERE basket_id = $1`,
+          [basketId],
+        );
+      }
+
+      await client.query(
+        `UPDATE prescription_header SET pre_state = $1, basket_id = NULL, updated_at = NOW() WHERE id = $2`,
+        [ELIMINATED_PRE_STATE, prescriptionId],
+      );
+
+      await client.query('COMMIT');
+      return { ok: true, basketId: basketId ?? null };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;

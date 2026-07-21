@@ -122,6 +122,7 @@ export class DepartmentsService implements OnModuleDestroy {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
+      console.log('NZP360 SendDeptInfo response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
       return {
