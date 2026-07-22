@@ -148,6 +148,13 @@ export class MachineService {
     }
   }
 
+  // Builds the exact SOAP envelope queryBasketFromRB1500 would send, without
+  // actually sending it — reuses the same private builder so the preview
+  // shown to the user before confirming can never drift from the real call.
+  buildSoapEnvelopeForQueryBasketPreview(str: string, type: string): string {
+    return this.buildSoapEnvelopeForQueryBasketRB1500(str, type);
+  }
+
   private buildSoapEnvelopeForQueryBasketRB1500(str: string, type: string) {
     return `<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -179,21 +186,32 @@ export class MachineService {
     }
 
     const xml = this.buildSoapEnvelopeForGetMachineStatusRB1500(machineId);
-    console.log('RB1500 GetMachineStatus XML:', xml);
+    console.log('RB1500 QueryMachineState XML:', xml);
 
     try {
       const response = await fetch(machineTarget, {
         method: 'POST',
         headers: {
-          'Content-Type': buildSoapContentType('GetMachineStatus'),
+          'Content-Type': buildSoapContentType('QueryMachineState'),
         },
         body: xml,
       });
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
-      console.log('RB1500 GetMachineStatus response:', responseText);
+      console.log('RB1500 QueryMachineState response:', responseText);
       const machineResult = parseMachineResult(responseText);
+
+      // The machine wraps its DataTable in literal "<![CDATA[" / "]]>" text
+      // rather than actual XML CDATA (see the raw response) — extractTagValues'
+      // plain regex match still finds MachineState/MachineMessage fine
+      // either way, since it doesn't care about surrounding text.
+      const machineState = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'MachineState')[0]
+        : undefined;
+      const machineMessage = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'MachineMessage')[0]
+        : undefined;
 
       return {
         ok: response.ok && machineResult.success,
@@ -204,6 +222,8 @@ export class MachineService {
           : machineResult.error ||
             `Machine responded with HTTP ${response.status}`,
         resultCode: machineResult.resultCode,
+        machineState,
+        machineMessage,
         innerXml: machineResult.innerXml,
         raw: responseText,
         queriedAt: new Date().toISOString(),
@@ -219,20 +239,20 @@ export class MachineService {
     }
   }
 
-  // Sample envelope only — NOT confirmed against the real machine yet
-  // (unlike SendPrescription's RB1500 shape, which was verified field-by-
-  // field). Two things need checking first if this starts failing:
-  // 1. The inner Root/Body/MachineId/Timestamp document is assumed to be
-  //    CDATA-wrapped inside <tns:str>, mirroring SendPrescription/
-  //    SendMedicine's inner-document convention — but the sample given
-  //    doesn't show the outer soap12:Envelope, so this is a guess, not a
-  //    confirmed shape (could instead be flat params like QueryBasket's
-  //    str/type, or a different operation/param name entirely).
-  // 2. The inner document's encoding="utf-16" is preserved as given even
-  //    though every other RB1500 inner document declares utf-8 — NZP360's
-  //    inner documents differ from their outer envelope's encoding too
-  //    (GB2312 vs utf-8), so this isn't unprecedented, but it's still
-  //    unconfirmed whether RB1500 actually expects utf-16 here specifically.
+  // The real operation name is QueryMachineState, not GetMachineStatus —
+  // confirmed by the machine's own SOAP fault when called under the wrong
+  // name ("无法识别操作 GetMachineStatus"). The inner Root/Body/MachineId/
+  // Timestamp document (utf-16, CDATA-wrapped inside <tns:str>) was already
+  // confirmed separately and is unchanged; only the operation name/action
+  // was wrong.
+  // Builds the exact SOAP envelope getMachineStatusFromRB1500 would send,
+  // without actually sending it — reuses the same private builder so the
+  // preview shown to the user before confirming can never drift from the
+  // real call.
+  buildSoapEnvelopeForGetMachineStatusPreview(machineId: number): string {
+    return this.buildSoapEnvelopeForGetMachineStatusRB1500(machineId);
+  }
+
   private buildSoapEnvelopeForGetMachineStatusRB1500(machineId: number) {
     const now = new Date();
     const pad2 = (value: number) => String(value).padStart(2, '0');
@@ -249,9 +269,9 @@ export class MachineService {
     return `<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
-    <tns:GetMachineStatus xmlns:tns="http://tempuri.org/">
+    <tns:QueryMachineState xmlns:tns="http://tempuri.org/">
       <tns:str><![CDATA[${statusXml}]]></tns:str>
-    </tns:GetMachineStatus>
+    </tns:QueryMachineState>
   </soap12:Body>
 </soap12:Envelope>`;
   }
@@ -293,7 +313,10 @@ export class MachineService {
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
-      console.log('RB1500 UpdateReadyPrescriptionState response:', responseText);
+      console.log(
+        'RB1500 UpdateReadyPrescriptionState response:',
+        responseText,
+      );
       const machineResult = parseMachineResult(responseText);
 
       return {
@@ -317,6 +340,18 @@ export class MachineService {
         updatedAt: new Date().toISOString(),
       };
     }
+  }
+
+  // Builds the exact SOAP envelope updateReadyPrescriptionStateOnRB1500
+  // would send, without actually sending it — reuses the same private
+  // builder so the preview shown to the user before confirming can never
+  // drift from the real call.
+  buildSoapEnvelopeForUpdateReadyPrescriptionStatePreview(
+    prescriptionhisid: string,
+  ): string {
+    return this.buildSoapEnvelopeForUpdateReadyPrescriptionStateRB1500(
+      prescriptionhisid,
+    );
   }
 
   private buildSoapEnvelopeForUpdateReadyPrescriptionStateRB1500(
@@ -391,6 +426,18 @@ export class MachineService {
         updatedAt: new Date().toISOString(),
       };
     }
+  }
+
+  // Builds the exact SOAP envelope execEliminatePrescriptionOnRB1500 would
+  // send, without actually sending it — reuses the same private builder so
+  // the preview shown to the user before confirming can never drift from
+  // the real call.
+  buildSoapEnvelopeForExecEliminatePrescriptionPreview(
+    prescriptionhisid: string,
+  ): string {
+    return this.buildSoapEnvelopeForExecEliminatePrescriptionRB1500(
+      prescriptionhisid,
+    );
   }
 
   private buildSoapEnvelopeForExecEliminatePrescriptionRB1500(

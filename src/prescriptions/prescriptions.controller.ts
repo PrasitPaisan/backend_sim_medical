@@ -81,6 +81,22 @@ export class PrescriptionsController {
     );
   }
 
+  // Lets the UI show the exact SOAP body(ies) before the user confirms
+  // sending — no machine call, no basket binding, no database write, purely
+  // a preview of what /send-batch would transmit for each prescription.
+  @Post('preview-send')
+  previewSend(@Body() body: { prescriptions?: any[] }) {
+    const prescriptions = body?.prescriptions;
+
+    if (!Array.isArray(prescriptions) || prescriptions.length === 0) {
+      throw new BadRequestException('prescriptions must be a non-empty array');
+    }
+
+    return {
+      previews: this.prescriptionsService.buildPreviewForBatch(prescriptions),
+    };
+  }
+
   @Post('send-batch')
   async sendBatch(
     @Body() body: { prescriptions?: any[]; destination?: string },

@@ -21,6 +21,18 @@ export class MachineController {
     return this.machineService.queryReadyPrescriptionsFromRB1500();
   }
 
+  // Lets the UI show the exact SOAP body before confirming a QueryBasket
+  // call — no machine call, purely a preview of what /query-basket would
+  // transmit for this str/type.
+  @Get('query-basket/preview')
+  queryBasketPreview(@Query('str') str?: string, @Query('type') type?: string) {
+    if (!str || !type) {
+      throw new BadRequestException('str and type are required');
+    }
+
+    return { xml: this.machineService.buildSoapEnvelopeForQueryBasketPreview(str, type) };
+  }
+
   @Get('query-basket')
   async queryBasket(@Query('str') str?: string, @Query('type') type?: string) {
     if (!str || !type) {
@@ -28,6 +40,20 @@ export class MachineController {
     }
 
     return await this.machineService.queryBasketFromRB1500(str, type);
+  }
+
+  // Lets the UI show the exact SOAP body before confirming a GetMachineStatus
+  // call — no machine call, purely a preview of what /status would transmit
+  // for this machineId.
+  @Get('status/preview')
+  getMachineStatusPreview(@Query('machineId') machineId?: string) {
+    if (!machineId) {
+      throw new BadRequestException('machineId is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForGetMachineStatusPreview(Number(machineId)),
+    };
   }
 
   @Get('status')
@@ -41,6 +67,22 @@ export class MachineController {
     );
   }
 
+  // Lets the UI show the exact SOAP body before confirming an
+  // UpdateReadyPrescriptionState call — no machine call, purely a preview of
+  // what /update-ready-state would transmit for this prescriptionhisid.
+  @Post('update-ready-state/preview')
+  updateReadyStatePreview(@Body() body: { prescriptionhisid?: string }) {
+    const { prescriptionhisid } = body ?? {};
+
+    if (!prescriptionhisid) {
+      throw new BadRequestException('prescriptionhisid is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForUpdateReadyPrescriptionStatePreview(prescriptionhisid),
+    };
+  }
+
   @Post('update-ready-state')
   async updateReadyState(@Body() body: { prescriptionhisid?: string }) {
     const { prescriptionhisid } = body ?? {};
@@ -52,6 +94,23 @@ export class MachineController {
     return this.machineService.updateReadyPrescriptionStateOnRB1500(
       prescriptionhisid,
     );
+  }
+
+  // Lets the UI show the exact SOAP body before confirming an
+  // ExecEliminatePrescription call — no machine call, no basket release,
+  // purely a preview of what /eliminate-prescription would transmit for
+  // this prescriptionhisid.
+  @Post('eliminate-prescription/preview')
+  eliminatePrescriptionPreview(@Body() body: { prescriptionhisid?: string }) {
+    const { prescriptionhisid } = body ?? {};
+
+    if (!prescriptionhisid) {
+      throw new BadRequestException('prescriptionhisid is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForExecEliminatePrescriptionPreview(prescriptionhisid),
+    };
   }
 
   // Real machine mutation, so POST. Once the machine confirms the
