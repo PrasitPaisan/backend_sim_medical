@@ -523,11 +523,8 @@ export class PrescriptionsService implements OnModuleDestroy {
       }
 
       try {
-        const xml = this.buildSoapEnvelopeForSendPrescriptionRB1500(
-          prescription,
-          destination,
-          basketId,
-        );
+        const xml =
+          this.buildSoapEnvelopeForSendPrescriptionRB1500(prescription);
         console.log('RB1500 SendPrescription XML:', xml);
         const response = await fetch(rb1500Target, {
           method: 'POST',
@@ -583,7 +580,10 @@ export class PrescriptionsService implements OnModuleDestroy {
             });
 
             const nzp360ResponseText = await nzp360Response.text();
-            console.log('NZP360 SendPrescription response:', nzp360ResponseText);
+            console.log(
+              'NZP360 SendPrescription response:',
+              nzp360ResponseText,
+            );
             const nzp360MachineResult = parseMachineResult(nzp360ResponseText);
             nzp360Ok = nzp360Response.ok && nzp360MachineResult.success;
             if (!nzp360Ok) {
@@ -703,49 +703,53 @@ export class PrescriptionsService implements OnModuleDestroy {
     }
   }
 
-  private buildSoapEnvelopeForSendPrescriptionRB1500(
-    prescription: any,
-    destination: string,
-    basketId: string,
-  ) {
+  // Structure confirmed working against the real machine (Postman capture):
+  // <root><prescription>...<itmlist><medicine>...</medicine></itmlist></prescription></root>
+  // inside a SOAP 1.2 envelope, consistent with RB1500's other operations.
+  // Notably absent from the confirmed sample: <destination> and <basket_id>
+  // — the earlier <basket_id> tag was a guess (see the CLAUDE.md note it
+  // came with) and wasn't actually part of the real contract, so this
+  // machine has no way to know which physical basket a prescription is
+  // destined for from this call alone; basket tracking stays purely
+  // internal to this backend.
+  private buildSoapEnvelopeForSendPrescriptionRB1500(prescription: any) {
     const details = Array.isArray(prescription?.details)
       ? prescription.details
       : [];
     const medicineXml = details
       .map((detail: any) => {
         return `
-      <medicine>
-        <prescriptionhisid>${escapeXml(prescription?.prescriptionhisid ?? '')}</prescriptionhisid>
-        <medhisid>${escapeXml(detail?.medhisid ?? '')}</medhisid>
-        <medunit>${escapeXml(detail?.medunit ?? '')}</medunit>
-        <medicinenum>${escapeXml(detail?.medicinenum ?? '')}</medicinenum>
-        <medicineheteromorphism>${escapeXml(detail?.medicineheteromorphism ?? 0)}</medicineheteromorphism>
-        <medicinehint>${escapeXml(detail?.medicinehint ?? '')}</medicinehint>
-        <medfactoryid>${escapeXml(detail?.medfactoryid ?? '')}</medfactoryid>
-        <medfactoryname>${escapeXml(detail?.medfactoryname ?? '')}</medfactoryname>
-        <medicinenamech>${escapeXml(detail?.medicinenamech ?? '')}</medicinenamech>
-      </medicine>`;
+            <medicine>
+                <prescriptionhisid>${escapeXml(prescription?.prescriptionhisid ?? '')}</prescriptionhisid>
+                <medhisid>${escapeXml(detail?.medhisid ?? '')}</medhisid>
+                <medunit>${escapeXml(detail?.medunit ?? '')}</medunit>
+                <medicinenum>${escapeXml(detail?.medicinenum ?? '')}</medicinenum>
+                <medicineheteromorphism>${escapeXml(detail?.medicineheteromorphism ?? 0)}</medicineheteromorphism>
+                <medicinehint>${escapeXml(detail?.medicinehint ?? '')}</medicinehint>
+                <medfactoryid>${escapeXml(detail?.medfactoryid ?? '')}</medfactoryid>
+                <medfactoryname>${escapeXml(detail?.medfactoryname ?? '')}</medfactoryname>
+                <medicinenamech>${escapeXml(detail?.medicinenamech ?? '')}</medicinenamech>
+            </medicine>`;
       })
       .join('');
 
-    const payloadXml = `<?xml version="1.0" encoding="utf-8"?>
+    const payloadXml = `
 <root>
-  <prescription>
-    <mzno>${escapeXml(prescription?.mzno ?? '')}</mzno>
-    <patientname>${escapeXml(prescription?.patientname ?? '')}</patientname>
-    <patientage>${escapeXml(prescription?.patientage ?? '')}</patientage>
-    <patientsex>${escapeXml(prescription?.patientsex ?? '')}</patientsex>
-    <prescriptionhisid>${escapeXml(prescription?.prescriptionhisid ?? '')}</prescriptionhisid>
-    <prescriptiondoctorname>${escapeXml(prescription?.prescriptiondoctorname ?? '')}</prescriptiondoctorname>
-    <prescriptionhint>${escapeXml(prescription?.prescriptionhint ?? '')}</prescriptionhint>
-    <departmentname>${escapeXml(prescription?.departmentname ?? '')}</departmentname>
-    <fetchwindow>${escapeXml(prescription?.fetchwindow ?? 0)}</fetchwindow>
-    <destination>${escapeXml(destination)}</destination>
-    <basket_id>${escapeXml(basketId)}</basket_id>
-    <itmlist>${medicineXml}
-    </itmlist>
-  </prescription>
-</root>`;
+    <prescription>
+        <mzno>${escapeXml(prescription?.mzno ?? '')}</mzno>
+        <patientname>${escapeXml(prescription?.patientname ?? '')}</patientname>
+        <patientage>${escapeXml(prescription?.patientage ?? '')}</patientage>
+        <patientsex>${escapeXml(prescription?.patientsex ?? '')}</patientsex>
+        <prescriptionhisid>${escapeXml(prescription?.prescriptionhisid ?? '')}</prescriptionhisid>
+        <prescriptiondoctorname>${escapeXml(prescription?.prescriptiondoctorname ?? '')}</prescriptiondoctorname>
+        <prescriptionhint>${escapeXml(prescription?.prescriptionhint ?? '')}</prescriptionhint>
+        <departmentname>${escapeXml(prescription?.departmentname ?? '')}</departmentname>
+        <fetchwindow>${escapeXml(prescription?.fetchwindow ?? 0)}</fetchwindow>
+        <itmlist>${medicineXml}
+        </itmlist>
+    </prescription>
+</root>
+`;
 
     return `<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -755,6 +759,40 @@ export class PrescriptionsService implements OnModuleDestroy {
     </tns:SendPrescription>
   </soap12:Body>
 </soap12:Envelope>`;
+  }
+
+  // Builds the exact SOAP envelope(s) sendBatchToMachines would send for
+  // each prescription, without actually sending anything or binding a
+  // basket — reuses the same private builders so the preview shown before
+  // confirming can never drift from what actually goes out over the wire.
+  // Each prescription always gets an RB1500 envelope; NZP360's is included
+  // only when at least one line item has dispense_type = 'nzp360', mirroring
+  // sendBatchToMachines' own skip-if-none-applicable logic.
+  buildPreviewForBatch(prescriptions: any[]) {
+    return prescriptions.map((prescription) => {
+      const rb1500Xml =
+        this.buildSoapEnvelopeForSendPrescriptionRB1500(prescription);
+
+      const nzp360Details = (
+        Array.isArray(prescription?.details) ? prescription.details : []
+      ).filter((detail: any) => detail?.dispense_type === 'nzp360');
+
+      const nzp360Xml =
+        nzp360Details.length > 0
+          ? this.buildSoapEnvelopeForSendPrescriptionNZP360({
+              ...prescription,
+              details: nzp360Details,
+            })
+          : undefined;
+
+      return {
+        id: prescription?.id,
+        mzno: prescription?.mzno,
+        prescriptionhisid: prescription?.prescriptionhisid,
+        rb1500Xml,
+        nzp360Xml,
+      };
+    });
   }
 
   // NZP360's SendPrescription contract, given as a working sample envelope —

@@ -49,41 +49,76 @@ export class DepartmentsService implements OnModuleDestroy {
     return res.rows;
   }
 
-  // Entry point for the Add Department form: the department is only written
-  // to department_dictionary once NZP360 itself has confirmed it via
-  // <Result>0</Result> — a department the machine rejected must not appear
-  // saved locally, since the machine's own dictionary is what prescriptions
-  // actually get validated against downstream.
-  async createDepartment(department: DepartmentInput) {
-    const sendResult = await this.sendDeptInfoToNZP360([
-      {
+  // Entry point for the Add Department form: departments are only written
+  // to department_dictionary once NZP360 itself has confirmed the whole
+  // batch via <Result>0</Result> — a department the machine rejected must
+  // not appear saved locally, since the machine's own dictionary is what
+  // prescriptions actually get validated against downstream. All-or-nothing,
+  // same as medicines' /send: one SOAP call for every department passed in.
+  async createDepartments(departments: DepartmentInput[]) {
+    const sendResult = await this.sendDeptInfoToNZP360(
+      departments.map((department) => ({
         deptCode: department.deptcode,
         deptName: department.deptname,
         deptPyCode: department.deptpy,
-      },
-    ]);
+      })),
+    );
 
     if (!sendResult.ok) {
       throw new BadRequestException(
-        `NZP360 rejected the department: ${sendResult.message}`,
+        `NZP360 rejected the department(s): ${sendResult.message}`,
       );
     }
 
-    return this.upsertDepartment(department);
+    const saved = await Promise.all(
+      departments.map((department) =>
+        this.upsertDepartment(department, 'synced'),
+      ),
+    );
+
+    return { ...sendResult, departments: saved };
   }
 
-  async upsertDepartment(department: DepartmentInput) {
+  // Persists departments straight to department_dictionary with no machine
+  // call at all — lets a department be prepared ahead of time and dispatched
+  // later by reselecting it from the Departments list (see createDepartments).
+  async saveDepartments(departments: DepartmentInput[]) {
+    const saved = await Promise.all(
+      departments.map((department) =>
+        this.upsertDepartment(department, 'pending'),
+      ),
+    );
+
+    return {
+      ok: true,
+      message: `Saved ${saved.length} department(s) to the database`,
+      departments: saved,
+    };
+  }
+
+  // syncStatus is 'synced' once the real machine has confirmed it (see
+  // createDepartments), or 'pending' when it's only been saved locally via
+  // saveDepartments. The CASE guard means a plain local save can never
+  // downgrade a row that's already 'synced' back to 'pending'.
+  async upsertDepartment(
+    department: DepartmentInput,
+    syncStatus: 'pending' | 'synced' = 'synced',
+  ) {
     const res = await this.pool.query(
       `
-      INSERT INTO department_dictionary (dept_code, dept_name, dept_py)
-      VALUES ($1, $2, $3)
+      INSERT INTO department_dictionary (dept_code, dept_name, dept_py, sync_status)
+      VALUES ($1, $2, $3, $4)
       ON CONFLICT (dept_code) DO UPDATE SET
         dept_name = EXCLUDED.dept_name,
         dept_py = EXCLUDED.dept_py,
+        sync_status = CASE
+          WHEN department_dictionary.sync_status = 'synced' THEN 'synced'
+          ELSE EXCLUDED.sync_status
+        END,
         updated_at = NOW()
       RETURNING *
       `,
-      [department.deptcode, department.deptname, department.deptpy],
+      [department.deptcode, department.deptname, department.deptpy, syncStatus],
     );
     return res.rows[0];
   }
@@ -91,6 +126,13 @@ export class DepartmentsService implements OnModuleDestroy {
   // ------------------------------------
   //   Send to machine
   // ------------------------------------
+
+  // Builds the exact SOAP envelope sendDeptInfoToNZP360 would send, without
+  // actually sending it — reuses the same private builder so the preview
+  // shown to the user before confirming can never drift from the real call.
+  buildSoapEnvelopeForPreview(depts: DeptInfoInput[]): string {
+    return this.buildSoapEnvelopeForSendDeptInfoNZP360(depts);
+  }
 
   async sendDeptInfoToNZP360(
     depts: DeptInfoInput[],

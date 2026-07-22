@@ -6,7 +6,23 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { DepartmentsService } from './departments.service';
+import { DepartmentsService, DepartmentInput } from './departments.service';
+
+function assertValidDepartments(
+  departments: unknown,
+): asserts departments is DepartmentInput[] {
+  if (!Array.isArray(departments) || departments.length === 0) {
+    throw new BadRequestException('departments must be a non-empty array');
+  }
+
+  for (const department of departments as DepartmentInput[]) {
+    if (!department?.deptcode || !department?.deptname || !department?.deptpy) {
+      throw new BadRequestException(
+        'deptcode, deptname and deptpy are required for every department',
+      );
+    }
+  }
+}
 
 @Controller('departments')
 export class DepartmentsController {
@@ -18,20 +34,38 @@ export class DepartmentsController {
     return this.departmentsService.findAll(l);
   }
 
-  @Post()
-  async create(
-    @Body() body: { deptcode?: string; deptname?: string; deptpy?: string },
-  ) {
-    if (!body?.deptcode || !body?.deptname || !body?.deptpy) {
-      throw new BadRequestException(
-        'deptcode, deptname and deptpy are required',
-      );
-    }
+  // Lets the UI show the exact SOAP body before the user confirms sending —
+  // no machine call, no database write, purely a preview of what POST /
+  // (createDepartments) would transmit.
+  @Post('preview')
+  preview(@Body() body: { departments?: DepartmentInput[] }) {
+    assertValidDepartments(body?.departments);
 
-    return this.departmentsService.createDepartment({
-      deptcode: body.deptcode,
-      deptname: body.deptname,
-      deptpy: body.deptpy,
-    });
+    const xml = this.departmentsService.buildSoapEnvelopeForPreview(
+      body.departments.map((department) => ({
+        deptCode: department.deptcode,
+        deptName: department.deptname,
+        deptPyCode: department.deptpy,
+      })),
+    );
+
+    return { xml };
+  }
+
+  @Post()
+  async create(@Body() body: { departments?: DepartmentInput[] }) {
+    assertValidDepartments(body?.departments);
+    return this.departmentsService.createDepartments(body.departments);
+  }
+
+  // Saves departments straight to department_dictionary with no machine
+  // call at all — lets a department be prepared ahead of time without
+  // needing the physical machine reachable right now. Rows land as
+  // sync_status = 'pending' (upsertDepartment's CASE guard means this can
+  // never downgrade an already-'synced' row).
+  @Post('save')
+  async save(@Body() body: { departments?: DepartmentInput[] }) {
+    assertValidDepartments(body?.departments);
+    return this.departmentsService.saveDepartments(body.departments);
   }
 }

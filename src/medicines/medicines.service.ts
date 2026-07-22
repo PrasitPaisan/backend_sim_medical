@@ -59,15 +59,21 @@ export class MedicinesService implements OnModuleDestroy {
     return res.rows;
   }
 
-  // Adds/updates the machine's copy of a medicine once the machine itself has
-  // confirmed it (see sendMedicineToRB1500) — this table is how the UI shows
-  // "which medicines are already on the machine" in the Add Medicine page.
-  async upsertMedicine(medicine: MedicineInput) {
+  // Adds/updates a medicine's row. syncStatus is 'synced' once the real
+  // machine has confirmed it (see sendMedicineToRB1500/NZP360), or 'pending'
+  // when it's only been saved locally via saveMedicines (prepared ahead of
+  // time, not yet dispatched). The CASE guard means a plain local save can
+  // never downgrade a row that's already 'synced' back to 'pending' — only
+  // an actual confirmed send can set 'synced', and once set it sticks.
+  async upsertMedicine(
+    medicine: MedicineInput,
+    syncStatus: 'pending' | 'synced' = 'synced',
+  ) {
     const res = await this.pool.query(
       `
       INSERT INTO medicine_dictionary
-        (medicinehisid, medicinenamech, medicinenameen, medicineunit, medicinestate, medfactoryid, medfactoryname, typeunit, hpmtypeunit, numcode, pycode, boxmaxnum, medposition, med_batch, validate_time, dispense_type, med_unit_capacity)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        (medicinehisid, medicinenamech, medicinenameen, medicineunit, medicinestate, medfactoryid, medfactoryname, typeunit, hpmtypeunit, numcode, pycode, boxmaxnum, medposition, med_batch, validate_time, dispense_type, med_unit_capacity, sync_status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       ON CONFLICT (medicinehisid, medicineunit, medfactoryname) DO UPDATE SET
         medicinenamech = EXCLUDED.medicinenamech,
         medicinenameen = EXCLUDED.medicinenameen,
@@ -83,6 +89,10 @@ export class MedicinesService implements OnModuleDestroy {
         validate_time = EXCLUDED.validate_time,
         dispense_type = EXCLUDED.dispense_type,
         med_unit_capacity = EXCLUDED.med_unit_capacity,
+        sync_status = CASE
+          WHEN medicine_dictionary.sync_status = 'synced' THEN 'synced'
+          ELSE EXCLUDED.sync_status
+        END,
         updated_at = NOW()
       RETURNING *
       `,
@@ -104,6 +114,7 @@ export class MedicinesService implements OnModuleDestroy {
         medicine.validate_time ?? null,
         medicine.dispense_type ?? 'manual',
         medicine.med_unit_capacity ?? null,
+        syncStatus,
       ],
     );
     return res.rows[0];
@@ -112,6 +123,19 @@ export class MedicinesService implements OnModuleDestroy {
   // ------------------------------------
   //   Send to machine
   // ------------------------------------
+
+  // Builds the exact SOAP envelope sendMedicineToRB1500/NZP360 would send,
+  // without actually sending it — reuses the same private builders so the
+  // preview shown to the user before confirming can never drift from what
+  // actually goes out over the wire.
+  buildSoapEnvelopeForPreview(
+    medicines: MedicineInput[],
+    targetMachine: 'RB1500' | 'NZP360',
+  ): string {
+    return targetMachine === 'NZP360'
+      ? this.buildSoapEnvelopeForSendMedicineNZP360(medicines)
+      : this.buildSoapEnvelopeForSendMedicineRB1500(medicines);
+  }
 
   async sendMedicineToRB1500(
     medicines: MedicineInput[],
