@@ -206,7 +206,7 @@ export class DepartmentsService implements OnModuleDestroy {
       )
       .join('');
 
-    const deptXml = `<?xml version="1.0" encoding="GB2312"?>
+    const deptXml = `<?xml version="1.0" encoding="UTF-8"?>
 <DocumentElement>${deptInfoXml}
 </DocumentElement>`;
 

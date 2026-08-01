@@ -92,9 +92,7 @@ export class PrescriptionsController {
       throw new BadRequestException('prescriptions must be a non-empty array');
     }
 
-    return {
-      previews: this.prescriptionsService.buildPreviewForBatch(prescriptions),
-    };
+    return this.prescriptionsService.buildPreviewForBatch(prescriptions);
   }
 
   @Post('send-batch')
@@ -116,6 +114,65 @@ export class PrescriptionsController {
       .map((result) => result.id as number);
 
     return { ...sendResult, updatedIds };
+  }
+
+  // Split-send: lets a pharmacist send NZP360 and RB1500 independently, in
+  // either order — e.g. NZP360 first so loose tablets are ready before the
+  // basket physically arrives on RB1500's conveyor. See preview-send for the
+  // combined preview; these mirror the same preview-before-send pattern per
+  // machine so the UI can show each XML before confirming.
+  @Post('preview-send-rb1500')
+  previewSendRb1500(@Body() body: { prescriptions?: any[] }) {
+    const prescriptions = body?.prescriptions;
+
+    if (!Array.isArray(prescriptions) || prescriptions.length === 0) {
+      throw new BadRequestException('prescriptions must be a non-empty array');
+    }
+
+    return this.prescriptionsService.buildPreviewForRb1500(prescriptions);
+  }
+
+  @Post('send-rb1500')
+  async sendRb1500(@Body() body: { prescriptions?: any[] }) {
+    const prescriptions = body?.prescriptions ?? [];
+
+    const sendResult =
+      await this.prescriptionsService.sendRb1500Only(prescriptions);
+
+    const updatedIds = sendResult.results
+      .filter((result) => result.ok && result.id !== undefined)
+      .map((result) => result.id as number);
+
+    return { ...sendResult, updatedIds };
+  }
+
+  @Post('preview-send-nzp360')
+  previewSendNzp360(@Body() body: { prescriptions?: any[] }) {
+    const prescriptions = body?.prescriptions;
+
+    if (!Array.isArray(prescriptions) || prescriptions.length === 0) {
+      throw new BadRequestException('prescriptions must be a non-empty array');
+    }
+
+    return this.prescriptionsService.buildPreviewForNzp360(prescriptions);
+  }
+
+  @Post('send-nzp360')
+  async sendNzp360(@Body() body: { prescriptions?: any[] }) {
+    const prescriptions = body?.prescriptions ?? [];
+
+    const sendResult =
+      await this.prescriptionsService.sendNzp360Only(prescriptions);
+
+    // Named sentIds rather than updatedIds — sending NZP360 alone never
+    // removes a prescription from Prescription Managements (pre_state stays
+    // -1), unlike send-batch/send-rb1500's updatedIds. The frontend uses this
+    // to flag nzp360_sent_at locally instead of dropping the row.
+    const sentIds = sendResult.results
+      .filter((result) => result.ok && result.id !== undefined)
+      .map((result) => result.id as number);
+
+    return { ...sendResult, sentIds };
   }
 
   // Machine Sim "Pass" action: advances the basket bound to this prescription

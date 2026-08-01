@@ -30,7 +30,12 @@ export class MachineController {
       throw new BadRequestException('str and type are required');
     }
 
-    return { xml: this.machineService.buildSoapEnvelopeForQueryBasketPreview(str, type) };
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryBasketPreview(
+        str,
+        type,
+      ),
+    };
   }
 
   @Get('query-basket')
@@ -52,7 +57,9 @@ export class MachineController {
     }
 
     return {
-      xml: this.machineService.buildSoapEnvelopeForGetMachineStatusPreview(Number(machineId)),
+      xml: this.machineService.buildSoapEnvelopeForGetMachineStatusPreview(
+        Number(machineId),
+      ),
     };
   }
 
@@ -79,7 +86,9 @@ export class MachineController {
     }
 
     return {
-      xml: this.machineService.buildSoapEnvelopeForUpdateReadyPrescriptionStatePreview(prescriptionhisid),
+      xml: this.machineService.buildSoapEnvelopeForUpdateReadyPrescriptionStatePreview(
+        prescriptionhisid,
+      ),
     };
   }
 
@@ -109,7 +118,9 @@ export class MachineController {
     }
 
     return {
-      xml: this.machineService.buildSoapEnvelopeForExecEliminatePrescriptionPreview(prescriptionhisid),
+      xml: this.machineService.buildSoapEnvelopeForExecEliminatePrescriptionPreview(
+        prescriptionhisid,
+      ),
     };
   }
 

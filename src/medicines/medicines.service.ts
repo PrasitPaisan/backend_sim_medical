@@ -9,6 +9,25 @@ import {
 } from '../common/soap.util';
 import { createPool } from '../common/db.util';
 
+// RB1500's own numeric code (confirmed via a real SendMedicine capture) for
+// which physical machine stores/dispenses a medicine: 1=RB1500, 2=NZP360,
+// 3=COBOT. Derived from dispense_type rather than stored separately —
+// 'manual' (and anything else unrecognized) has no machine code, since a
+// manually-dispensed medicine was never registered with a machine at all.
+const DISPENSE_TYPE_TO_STORE_MACHINE: Record<string, number> = {
+  manual: 0,
+  rb1500: 1,
+  nzp360: 2,
+  cobot: 3,
+};
+
+function mapDispenseTypeToStoreMachine(
+  dispenseType: string | undefined,
+): number | '' {
+  if (!dispenseType) return '';
+  return DISPENSE_TYPE_TO_STORE_MACHINE[dispenseType] ?? '';
+}
+
 export type MedicineInput = {
   medicinehisid: string;
   medicinenamech: string;
@@ -29,6 +48,8 @@ export type MedicineInput = {
   med_unit_capacity?: number;
   /** Which station/machine this medicine is dispensed by (manual, cobot, or a machine model code like nzp360/rb1500). DB-only — not part of the SendMedicine XML contract. */
   dispense_type?: string;
+  /** RB1500-only field: electronic medication tracking code(s), each 7 digits, multiple codes joined with '|'. Free text, not validated/split here. */
+  desc_code?: string;
 };
 
 export type SendMedicineResult = {
@@ -72,8 +93,8 @@ export class MedicinesService implements OnModuleDestroy {
     const res = await this.pool.query(
       `
       INSERT INTO medicine_dictionary
-        (medicinehisid, medicinenamech, medicinenameen, medicineunit, medicinestate, medfactoryid, medfactoryname, typeunit, hpmtypeunit, numcode, pycode, boxmaxnum, medposition, med_batch, validate_time, dispense_type, med_unit_capacity, sync_status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        (medicinehisid, medicinenamech, medicinenameen, medicineunit, medicinestate, medfactoryid, medfactoryname, typeunit, hpmtypeunit, numcode, pycode, boxmaxnum, medposition, med_batch, validate_time, dispense_type, med_unit_capacity, sync_status, desc_code)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       ON CONFLICT (medicinehisid, medicineunit, medfactoryname) DO UPDATE SET
         medicinenamech = EXCLUDED.medicinenamech,
         medicinenameen = EXCLUDED.medicinenameen,
@@ -89,6 +110,7 @@ export class MedicinesService implements OnModuleDestroy {
         validate_time = EXCLUDED.validate_time,
         dispense_type = EXCLUDED.dispense_type,
         med_unit_capacity = EXCLUDED.med_unit_capacity,
+        desc_code = EXCLUDED.desc_code,
         sync_status = CASE
           WHEN medicine_dictionary.sync_status = 'synced' THEN 'synced'
           ELSE EXCLUDED.sync_status
@@ -115,6 +137,7 @@ export class MedicinesService implements OnModuleDestroy {
         medicine.dispense_type ?? 'manual',
         medicine.med_unit_capacity ?? null,
         syncStatus,
+        medicine.desc_code ?? null,
       ],
     );
     return res.rows[0];
@@ -194,9 +217,15 @@ export class MedicinesService implements OnModuleDestroy {
   // Structure confirmed working against the real machine: the inner CDATA
   // payload is <medicine><itmlist><changemed>...</changemed></itmlist></medicine>
   // inside a SOAP 1.2 envelope — the machine's own field names are
-  // medbatch/validatetime (no underscore) plus a desc_code tag with no
-  // backing DB column, which is why those three don't map 1:1 to
-  // medicine_dictionary like the rest do.
+  // medbatch/validatetime (no underscore), which is why those two don't map
+  // 1:1 to medicine_dictionary like the rest do. medstoremachine (confirmed
+  // via a second real capture) is RB1500's own numeric code for which
+  // physical machine stores/dispenses this medicine — derived from our own
+  // dispense_type, not a separate stored field (see
+  // mapDispenseTypeToStoreMachine below). desc_code (per RB1500's API spec)
+  // is the electronic medication tracking code(s) for this medicine, each 7
+  // digits, multiple codes joined with '|' — free text, not validated/split
+  // here.
   private buildSoapEnvelopeForSendMedicineRB1500(
     medicines: MedicineInput[],
   ): string {
@@ -209,15 +238,16 @@ export class MedicinesService implements OnModuleDestroy {
                 <medicinenameen>${escapeXml(medicine.medicinenameen ?? '')}</medicinenameen>
                 <medicineunit>${escapeXml(medicine.medicineunit)}</medicineunit>
                 <medicinestate>${escapeXml(medicine.medicinestate ?? 1)}</medicinestate>
-                <medfactoryid>${escapeXml(medicine.medfactoryid ?? '')}</medfactoryid>
                 <medfactoryname>${escapeXml(medicine.medfactoryname)}</medfactoryname>
+                <medstoremachine>${escapeXml(mapDispenseTypeToStoreMachine(medicine.dispense_type))}</medstoremachine>
+                <medfactoryid>${escapeXml(medicine.medfactoryid ?? '')}</medfactoryid>
                 <typeunit>${escapeXml(medicine.typeunit)}</typeunit>
                 <hpmtypeunit>${escapeXml(medicine.hpmtypeunit)}</hpmtypeunit>
                 <numcode>${escapeXml(medicine.numcode ?? '')}</numcode>
                 <pycode>${escapeXml(medicine.pycode)}</pycode>
                 <boxmaxnum>${escapeXml(medicine.boxmaxnum ?? 1)}</boxmaxnum>
                 <medposition>${escapeXml(medicine.medposition ?? '')}</medposition>
-                <desc_code></desc_code>
+                <desc_code>${escapeXml(medicine.desc_code ?? '')}</desc_code>
                 <medbatch>${escapeXml(medicine.med_batch ?? '')}</medbatch>
                 <validatetime>${escapeXml(medicine.validate_time ?? '')}</validatetime>
                 </changemed>`,
@@ -244,7 +274,7 @@ export class MedicinesService implements OnModuleDestroy {
   // yet confirmed against the real machine (unlike sendMedicineToRB1500,
   // which was verified field-by-field over Postman) — check this first if
   // calls to it start failing. Note the different inner shape vs RB1500:
-  // DocumentElement/DataTable (GB2312-declared) instead of medicine/itmlist,
+  // DocumentElement/DataTable (UTF-8-declared) instead of medicine/itmlist,
   // and a smaller, differently-named field set (no hpmtypeunit, medposition,
   // med_batch, or validate_time on this machine).
   async sendMedicineToNZP360(
@@ -323,7 +353,7 @@ export class MedicinesService implements OnModuleDestroy {
       )
       .join('');
 
-    const medXml = `<?xml version="1.0" encoding="GB2312"?>
+    const medXml = `<?xml version="1.0" encoding="UTF-8"?>
 <DocumentElement>${dataTableXml}
 </DocumentElement>`;
 
