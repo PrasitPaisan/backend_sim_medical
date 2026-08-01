@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:17
+    container_name: sim-web-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: dbmedicalmock
+    ports:
+      - "5433:5432"
+    volumes:
+      - sim_web_pgdata:/var/lib/postgresql/data
+
+volumes:
+  sim_web_pgdata:

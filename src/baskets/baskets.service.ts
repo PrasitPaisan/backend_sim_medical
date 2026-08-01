@@ -221,10 +221,12 @@ export class BasketsService implements OnModuleDestroy {
   }
 
   // Simulation-only reset button (Machine Sim): unbinds every basket and
-  // puts every prescription back to "received" (-1), so testers can re-run
-  // a scenario from scratch without touching the database by hand. This app
-  // is a simulator, not the real dispensing pipeline, so a blunt full reset
-  // is fine here — it would not be safe against a real machine.
+  // puts every prescription back to "received" (-1), clearing nzp360_sent_at
+  // too so a split-sent-to-NZP360 prescription is genuinely fresh again, not
+  // still flagged as sent — so testers can re-run a scenario from scratch
+  // without touching the database by hand. This app is a simulator, not the
+  // real dispensing pipeline, so a blunt full reset is fine here — it would
+  // not be safe against a real machine.
   async resetAll(): Promise<{
     basketsReset: number;
     prescriptionsReset: number;
@@ -238,8 +240,8 @@ export class BasketsService implements OnModuleDestroy {
          WHERE prescription_id IS NOT NULL OR station_status <> 0`,
       );
       const prescriptionRes = await client.query(
-        `UPDATE prescription_header SET pre_state = -1, basket_id = NULL, updated_at = NOW()
-         WHERE pre_state <> -1 OR basket_id IS NOT NULL`,
+        `UPDATE prescription_header SET pre_state = -1, basket_id = NULL, nzp360_sent_at = NULL, updated_at = NOW()
+         WHERE pre_state <> -1 OR basket_id IS NOT NULL OR nzp360_sent_at IS NOT NULL`,
       );
 
       await client.query('COMMIT');
