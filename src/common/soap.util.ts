@@ -101,3 +101,24 @@ export function extractTagValues(xml: string, tagName: string): string[] {
   }
   return values;
 }
+
+// Splits an XML fragment into each occurrence of a repeated block (e.g.
+// <BasketItem>...</BasketItem> inside a <BasketList>) so a caller can run
+// extractTagValues on each block individually — correlating several fields
+// per item, which extractTagValues alone can't do since it only returns one
+// flat list across the whole fragment, not grouped per item.
+export function extractRepeatedBlocks(
+  xml: string,
+  blockTagName: string,
+): string[] {
+  const pattern = new RegExp(
+    `<${blockTagName}>([\\s\\S]*?)<\\/${blockTagName}>`,
+    'g',
+  );
+  const blocks: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(xml)) !== null) {
+    blocks.push(match[1]);
+  }
+  return blocks;
+}

@@ -60,7 +60,7 @@ export class PrescriptionsController {
   }
 
   // Monitor Queue's data source: prescriptions currently called for pickup
-  // (basket station_status = 7), each with the fetchwindow (pickup
+  // (basket station_status = 8), each with the fetchwindow (pickup
   // counter/channel) to display to the patient.
   @Get('monitor-queue')
   async monitorQueue() {

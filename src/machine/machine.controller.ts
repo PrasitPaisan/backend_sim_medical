@@ -6,8 +6,35 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { MachineService } from './machine.service';
+import { MachineService, UpdateCobotTaskInput } from './machine.service';
 import { BasketsService } from '../baskets/baskets.service';
+
+function parseUpdateCobotTaskInput(
+  body: Partial<UpdateCobotTaskInput>,
+): UpdateCobotTaskInput {
+  const { machineId, cobotId, taskNo, taskState } = body ?? {};
+
+  if (
+    machineId === undefined ||
+    !cobotId ||
+    !taskNo ||
+    taskState === undefined
+  ) {
+    throw new BadRequestException(
+      'machineId, cobotId, taskNo and taskState are required',
+    );
+  }
+
+  return {
+    machineId: Number(machineId),
+    cobotId,
+    taskNo,
+    taskState: Number(taskState),
+    taskErrorId:
+      body.taskErrorId !== undefined ? Number(body.taskErrorId) : undefined,
+    taskMessage: body.taskMessage,
+  };
+}
 
 @Controller('machine')
 export class MachineController {
@@ -23,7 +50,8 @@ export class MachineController {
 
   // Lets the UI show the exact SOAP body before confirming a QueryBasket
   // call — no machine call, purely a preview of what /query-basket would
-  // transmit for this str/type.
+  // transmit for this str/type. type doubles as a lighting command (1 blue,
+  // 2 green, 3 red, anything else = plain query) — see queryBasketFromRB1500.
   @Get('query-basket/preview')
   queryBasketPreview(@Query('str') str?: string, @Query('type') type?: string) {
     if (!str || !type) {
@@ -74,6 +102,88 @@ export class MachineController {
     );
   }
 
+  // Lets the UI show the exact SOAP body before confirming a QueryCOBOTTask
+  // call — no machine call, purely a preview of what /query-cobot-task would
+  // transmit for this machineId/cobotId.
+  @Get('query-cobot-task/preview')
+  queryCobotTaskPreview(
+    @Query('machineId') machineId?: string,
+    @Query('cobotId') cobotId?: string,
+  ) {
+    if (!machineId || !cobotId) {
+      throw new BadRequestException('machineId and cobotId are required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryCobotTaskPreview(
+        Number(machineId),
+        cobotId,
+      ),
+    };
+  }
+
+  @Get('query-cobot-task')
+  async queryCobotTask(
+    @Query('machineId') machineId?: string,
+    @Query('cobotId') cobotId?: string,
+  ) {
+    if (!machineId || !cobotId) {
+      throw new BadRequestException('machineId and cobotId are required');
+    }
+
+    return await this.machineService.queryCobotTaskFromRB1500(
+      Number(machineId),
+      cobotId,
+    );
+  }
+
+  // Lets the UI show the exact SOAP body before confirming a
+  // QueryBasketPosition call — no machine call, purely a preview of what
+  // /query-basket-position would transmit for this withinTime.
+  @Get('query-basket-position/preview')
+  queryBasketPositionPreview(@Query('withinTime') withinTime?: string) {
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryBasketPositionPreview(
+        withinTime ? Number(withinTime) : 300,
+      ),
+    };
+  }
+
+  // Bulk position query — returns every basket RB1500 has moved recently, not
+  // just one prescription's (see MachineService.queryBasketPositionFromRB1500
+  // for why withinTime defaults to 300s / 5 minutes, matching RB1500's spec).
+  @Get('query-basket-position')
+  async queryBasketPosition(@Query('withinTime') withinTime?: string) {
+    return await this.machineService.queryBasketPositionFromRB1500(
+      withinTime ? Number(withinTime) : 300,
+    );
+  }
+
+  // Lets the UI show the exact SOAP body before confirming an
+  // UpdateCOBOTTask call — no machine call, purely a preview of what
+  // /update-cobot-task would transmit for this task update.
+  @Post('update-cobot-task/preview')
+  updateCobotTaskPreview(@Body() body: Partial<UpdateCobotTaskInput>) {
+    const input = parseUpdateCobotTaskInput(body);
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForUpdateCobotTaskPreview(
+        input,
+      ),
+    };
+  }
+
+  // Real machine call, so POST — this is what actually tells RB1500 a COBOT
+  // finished (or failed) its task, letting the basket carry on past the
+  // COBOT station. Not wired into any database state yet — machine-only
+  // call for now, same as eliminate-prescription/update-ready-state.
+  @Post('update-cobot-task')
+  async updateCobotTask(@Body() body: Partial<UpdateCobotTaskInput>) {
+    const input = parseUpdateCobotTaskInput(body);
+
+    return await this.machineService.updateCobotTaskOnRB1500(input);
+  }
+
   // Lets the UI show the exact SOAP body before confirming an
   // UpdateReadyPrescriptionState call — no machine call, purely a preview of
   // what /update-ready-state would transmit for this prescriptionhisid.
@@ -103,6 +213,54 @@ export class MachineController {
     return this.machineService.updateReadyPrescriptionStateOnRB1500(
       prescriptionhisid,
     );
+  }
+
+  // Pharmacist Recheck's "Confirm Dispensing" action — same SOAP call as
+  // /update-ready-state above (reuses the same preview builder, so no
+  // separate preview route), but this one also marks the prescription
+  // pre_state = 1 (complete) once the machine confirms, without releasing
+  // the basket (see BasketsService.confirmRecheckByPrescriptionHisId).
+  // Deliberately a separate endpoint from /update-ready-state — that one is
+  // Machine Sim's machine-only test action and must keep doing nothing to
+  // the database, so this new behavior can't be bolted onto it.
+  @Post('confirm-recheck/preview')
+  confirmRecheckPreview(@Body() body: { prescriptionhisid?: string }) {
+    const { prescriptionhisid } = body ?? {};
+
+    if (!prescriptionhisid) {
+      throw new BadRequestException('prescriptionhisid is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForUpdateReadyPrescriptionStatePreview(
+        prescriptionhisid,
+      ),
+    };
+  }
+
+  @Post('confirm-recheck')
+  async confirmRecheck(@Body() body: { prescriptionhisid?: string }) {
+    const { prescriptionhisid } = body ?? {};
+
+    if (!prescriptionhisid) {
+      throw new BadRequestException('prescriptionhisid is required');
+    }
+
+    const machineResult =
+      await this.machineService.updateReadyPrescriptionStateOnRB1500(
+        prescriptionhisid,
+      );
+
+    if (!machineResult.ok) {
+      return machineResult;
+    }
+
+    const confirmResult =
+      await this.basketsService.confirmRecheckByPrescriptionHisId(
+        prescriptionhisid,
+      );
+
+    return { ...machineResult, confirmed: confirmResult.ok };
   }
 
   // Lets the UI show the exact SOAP body before confirming an

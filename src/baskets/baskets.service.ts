@@ -5,12 +5,16 @@ import { createPool } from '../common/db.util';
 
 // Mirrors frontend_sim/src/lib/stations.ts PIPELINE_STATIONS — kept as local
 // constants since the two apps don't share code.
-// Pharmacist recheck (6) marks the prescription as dispensed/complete, but the
-// basket stays bound through two more simulation-only steps: calling the
-// patient to pick up (7) and confirming they received it (8) — only then is
-// the basket actually released back to the pool.
-const RECHECK_STATION_STATUS = 6;
-const FINAL_STATION_STATUS = 8;
+// Station 6 ("Arrived at Recheck Point") is the basket physically reaching
+// the recheck area — mapped from RB1500's real QueryBasketPosition
+// Position=6 "End" — and does NOT trigger completion on its own. Pharmacist
+// recheck (7) is the pharmacist actually having verified it, which marks the
+// prescription as dispensed/complete; the basket then stays bound through two
+// more simulation-only steps: calling the patient to pick up (8) and
+// confirming they received it (9) — only then is the basket released back to
+// the pool.
+const RECHECK_STATION_STATUS = 7;
+const FINAL_STATION_STATUS = 9;
 
 // A prescription the machine eliminated/cancelled — deliberately distinct
 // from -1 (received)/0 (in progress)/1 (complete) so it disappears from
@@ -26,6 +30,9 @@ export type AdvanceStationResult =
 
 export type EliminateResult =
   { ok: true; basketId: string | null } | { ok: false; reason: 'not_found' };
+
+export type ConfirmRecheckResult =
+  { ok: true } | { ok: false; reason: 'not_found' };
 
 @Injectable()
 export class BasketsService implements OnModuleDestroy {
@@ -218,6 +225,36 @@ export class BasketsService implements OnModuleDestroy {
     } finally {
       client.release();
     }
+  }
+
+  // Called after the real machine confirms UpdateReadyPrescriptionState
+  // succeeded (see MachineController's Pharmacist Recheck "Confirm
+  // Dispensing" action) — marks the prescription complete (pre_state = 1)
+  // WITHOUT touching the basket. This is deliberately separate from
+  // eliminateByPrescriptionHisId above: the pharmacist has verified
+  // dispensing is done, but the basket still physically holds the medicine
+  // until the patient actually picks it up and a separate Eliminate action
+  // releases it. Only flips pre_state that's still 0 — never regresses an
+  // already-eliminated (2) or somehow-still-received (-1) prescription.
+  async confirmRecheckByPrescriptionHisId(
+    prescriptionhisid: string,
+  ): Promise<ConfirmRecheckResult> {
+    const res = await this.pool.query(
+      `UPDATE prescription_header SET pre_state = 1, updated_at = NOW() WHERE prescriptionhisid = $1 AND pre_state = 0`,
+      [prescriptionhisid],
+    );
+
+    if (res.rowCount === 0) {
+      const existsRes = await this.pool.query(
+        `SELECT 1 FROM prescription_header WHERE prescriptionhisid = $1`,
+        [prescriptionhisid],
+      );
+      if (existsRes.rows.length === 0) {
+        return { ok: false, reason: 'not_found' };
+      }
+    }
+
+    return { ok: true };
   }
 
   // Simulation-only reset button (Machine Sim): unbinds every basket and

@@ -17,6 +17,58 @@ import { BasketsService } from '../baskets/baskets.service';
 // so a bigger batch means a bigger all-or-nothing blast radius if rejected.
 const MAX_MACHINE_BATCH_SIZE = 50;
 
+function isCobotPrescription(prescription: any): boolean {
+  return (
+    Array.isArray(prescription?.details) &&
+    prescription.details.some(
+      (detail: any) => detail?.dispense_type === 'cobot',
+    )
+  );
+}
+
+// The physical COBOT station can't dispense two baskets back-to-back — but
+// this backend only ever learns a basket cleared a station *after the fact*
+// (advance-station), and stations can be skipped, so there's no reliable way
+// to detect "a basket is about to reach COBOT" ahead of time. The one lever
+// we do fully control is dispatch order: spreading cobot-dispensing
+// prescriptions evenly across a batch (rather than sending them consecutive
+// or clustered) means several other prescriptions are physically processed
+// on the conveyor between any two cobot ones, giving COBOT time to clear.
+// This only spaces things out *within one dispatch call* — it has no memory
+// of a cobot basket still in flight from an earlier, separate send.
+function interleaveCobotPrescriptions(prescriptions: any[]): any[] {
+  const cobotItems = prescriptions.filter(isCobotPrescription);
+  if (cobotItems.length === 0) return prescriptions;
+
+  const otherItems = prescriptions.filter(
+    (prescription) => !isCobotPrescription(prescription),
+  );
+
+  const n = prescriptions.length;
+  const c = cobotItems.length;
+  const result: any[] = new Array(n).fill(undefined);
+
+  // Evenly spread target positions, e.g. 2 cobot items among 20 total land
+  // at (1-indexed) positions 10 and 20 — round(i * n / c) for i = 1..c.
+  const usedPositions = new Set<number>();
+  cobotItems.forEach((item, i) => {
+    let pos = Math.round(((i + 1) * n) / c) - 1; // 0-indexed
+    pos = Math.max(0, Math.min(n - 1, pos));
+    while (usedPositions.has(pos) && pos < n - 1) pos++;
+    usedPositions.add(pos);
+    result[pos] = item;
+  });
+
+  let otherIndex = 0;
+  for (let i = 0; i < n; i++) {
+    if (result[i] === undefined) {
+      result[i] = otherItems[otherIndex++];
+    }
+  }
+
+  return result;
+}
+
 @Injectable()
 export class PrescriptionsService implements OnModuleDestroy {
   private pool: Pool;
@@ -234,7 +286,7 @@ export class PrescriptionsService implements OnModuleDestroy {
   // Process Tracking's data source: prescriptions in progress (0) joined to
   // their bound basket's station_status, PLUS already-complete ones (1) so
   // pharmacists can still check them here — those no longer have a basket
-  // bound once the patient has actually picked up the medicine (station 8
+  // bound once the patient has actually picked up the medicine (station 9
   // releases it back to the pool), so the join is LEFT and a missing
   // station_status is treated as that final station.
   async findInProgress(limit = 100) {
@@ -262,7 +314,7 @@ export class PrescriptionsService implements OnModuleDestroy {
           ph.deptcode,
           ph.priority,
           b.basket_id,
-          COALESCE(b.station_status, CASE WHEN ph.pre_state = 1 THEN 8 ELSE 0 END) AS station_status,
+          COALESCE(b.station_status, CASE WHEN ph.pre_state = 1 THEN 9 ELSE 0 END) AS station_status,
           COALESCE(
             json_agg(
               json_build_object(
@@ -314,8 +366,8 @@ export class PrescriptionsService implements OnModuleDestroy {
   // ------------------------------------------------
 
   // Monitor Queue's data source: prescriptions whose basket is sitting at
-  // station_status = 7 ("call patient for pickup") — i.e. the pharmacist has
-  // already called them but they haven't confirmed pickup (station 8) yet.
+  // station_status = 8 ("call patient for pickup") — i.e. the pharmacist has
+  // already called them but they haven't confirmed pickup (station 9) yet.
   // fetchwindow is the pickup counter/channel to display prominently.
   // Ordered oldest-called-first so the board reads like a real queue.
   async findCalledForPickup() {
@@ -330,7 +382,7 @@ export class PrescriptionsService implements OnModuleDestroy {
         b.updated_at AS called_at
       FROM basket b
       JOIN prescription_header ph ON ph.id = b.prescription_id
-      WHERE b.station_status = 7
+      WHERE b.station_status = 8
       ORDER BY b.updated_at ASC
       `,
     );
@@ -517,6 +569,10 @@ export class PrescriptionsService implements OnModuleDestroy {
         })),
       };
     }
+
+    // Spread any cobot-dispensing prescriptions evenly across this batch
+    // before anything else — see interleaveCobotPrescriptions for why.
+    prescriptions = interleaveCobotPrescriptions(prescriptions);
 
     const results: Array<{
       id?: number;
@@ -815,6 +871,8 @@ export class PrescriptionsService implements OnModuleDestroy {
         })),
       };
     }
+
+    prescriptions = interleaveCobotPrescriptions(prescriptions);
 
     const results: Array<{
       id?: number;
@@ -1280,10 +1338,16 @@ export class PrescriptionsService implements OnModuleDestroy {
   // chunks* (mirroring sendBatchToMachines exactly — one NZP360 call per
   // RB1500 chunk's nzp360-eligible prescriptions, skipped if none).
   buildPreviewForBatch(prescriptions: any[]) {
+    prescriptions = interleaveCobotPrescriptions(prescriptions);
+
     const rb1500Batches: Array<{
       prescriptionIds: Array<number | undefined>;
       mznos: Array<string | undefined>;
       prescriptionHisIds: Array<string | undefined>;
+      // Aligned index-for-index with the arrays above — lets the UI mark
+      // which prescriptions in this dispatch order actually need COBOT,
+      // since interleaveCobotPrescriptions already decided their positions.
+      cobotFlags: boolean[];
       xml: string;
     }> = [];
     const nzp360Batches: Array<{
@@ -1299,6 +1363,7 @@ export class PrescriptionsService implements OnModuleDestroy {
         prescriptionIds: chunk.map((p) => p?.id),
         mznos: chunk.map((p) => p?.mzno),
         prescriptionHisIds: chunk.map((p) => p?.prescriptionhisid),
+        cobotFlags: chunk.map((p) => isCobotPrescription(p)),
         xml: this.buildSoapEnvelopeForSendPrescriptionBatchRB1500(chunk),
       });
 
@@ -1343,10 +1408,13 @@ export class PrescriptionsService implements OnModuleDestroy {
   // Preview counterpart to sendRb1500Only — same chunking, same builder, no
   // basket bind/machine call/DB write.
   buildPreviewForRb1500(prescriptions: any[]) {
+    prescriptions = interleaveCobotPrescriptions(prescriptions);
+
     const batches: Array<{
       prescriptionIds: Array<number | undefined>;
       mznos: Array<string | undefined>;
       prescriptionHisIds: Array<string | undefined>;
+      cobotFlags: boolean[];
       xml: string;
     }> = [];
 
@@ -1356,6 +1424,7 @@ export class PrescriptionsService implements OnModuleDestroy {
         prescriptionIds: chunk.map((p) => p?.id),
         mznos: chunk.map((p) => p?.mzno),
         prescriptionHisIds: chunk.map((p) => p?.prescriptionhisid),
+        cobotFlags: chunk.map((p) => isCobotPrescription(p)),
         xml: this.buildSoapEnvelopeForSendPrescriptionBatchRB1500(chunk),
       });
     }

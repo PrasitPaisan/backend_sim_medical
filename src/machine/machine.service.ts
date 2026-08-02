@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   buildSoapContentType,
   escapeXml,
+  extractRepeatedBlocks,
   extractTagValues,
   getMachineTarget,
   parseMachineResult,
@@ -14,6 +15,31 @@ import {
 // corresponding database read/write here. Kept separate from
 // PrescriptionsService so that service can stay about prescription_header/
 // prescription_detail CRUD, not arbitrary machine calls.
+
+// taskState: 0 Unprocessed new task, 1 Received, 2 Process complete, 3
+// Process failed — see updateCobotTaskOnRB1500.
+export type UpdateCobotTaskInput = {
+  machineId: number;
+  cobotId: string;
+  taskNo: string;
+  taskState: number;
+  taskErrorId?: number;
+  taskMessage?: string;
+};
+
+// Position: 0 Idle, 1 Binding card position, 2 Manual replenishment
+// position, 3 NZP360 dispensing position, 4 T type exit, 5 COBOT dispensing
+// position, 6 End — RB1500's own numbering, deliberately NOT the same scale
+// as this backend's basket.station_status (they diverge at 2/3/4), so never
+// map one onto the other. See queryBasketPositionFromRB1500.
+export type BasketPositionItem = {
+  basketId?: string;
+  preNo?: string;
+  splitNo?: string;
+  position?: number;
+  lastTime?: string;
+};
+
 @Injectable()
 export class MachineService {
   constructor(private config: ConfigService) {}
@@ -90,9 +116,12 @@ export class MachineService {
 </soap12:Envelope>`;
   }
 
-  // Asks the machine for basket info by some identifier (str) and a query
-  // type (type) — read-only against the machine, no database reads or
-  // writes here, same as queryReadyPrescriptionsFromRB1500.
+  // Asks the machine for the basket bound to a prescription — despite the
+  // name this isn't purely read-only: `type` doubles as a lighting command
+  // (per RB1500's spec): 1 = light the basket blue, 2 = green, 3 = red,
+  // anything else = plain query with no lighting side effect. `str` is the
+  // prescriptionhisid (RB1500 calls it "unique number of prescription in
+  // HIS"). No database reads or writes on our side either way.
   async queryBasketFromRB1500(str: string, type: string) {
     let machineTarget: string;
     try {
@@ -124,6 +153,26 @@ export class MachineService {
       console.log('RB1500 QueryBasket response:', responseText);
       const machineResult = parseMachineResult(responseText);
 
+      // DataTable's fields mirror prescription_header columns almost 1:1
+      // (patient_name/fetch_window/delete_flag/basket_Id/finish_time) —
+      // confirmed via a real error-case capture (Result=-1, "PrescriptionID
+      // not exist!" when str isn't a prescriptionhisid RB1500 recognizes).
+      const patientName = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'patient_name')[0]
+        : undefined;
+      const fetchWindow = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'fetch_window')[0]
+        : undefined;
+      const deleteFlag = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'delete_flag')[0]
+        : undefined;
+      const basketId = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'basket_Id')[0]
+        : undefined;
+      const finishTime = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'finish_time')[0]
+        : undefined;
+
       return {
         ok: response.ok && machineResult.success,
         status: response.status,
@@ -133,6 +182,11 @@ export class MachineService {
           : machineResult.error ||
             `Machine responded with HTTP ${response.status}`,
         resultCode: machineResult.resultCode,
+        patientName,
+        fetchWindow,
+        deleteFlag,
+        basketId,
+        finishTime,
         innerXml: machineResult.innerXml,
         raw: responseText,
         queriedAt: new Date().toISOString(),
@@ -276,8 +330,354 @@ export class MachineService {
 </soap12:Envelope>`;
   }
 
+  // Asks RB1500 which task a given COBOT should work on next — read-only
+  // against the machine, no database reads or writes here, same as the other
+  // RB1500 query methods. Same inner-document shape as QueryMachineState
+  // (Root/Body/..., utf-16 declared, CDATA-wrapped inside <tns:str>) plus a
+  // CobotId field identifying which physical COBOT unit is asking.
+  async queryCobotTaskFromRB1500(machineId: number, cobotId: string) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'RB1500');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForQueryCobotTaskRB1500(
+      machineId,
+      cobotId,
+    );
+    console.log('RB1500 QueryCOBOTTask XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: {
+          'Content-Type': buildSoapContentType('QueryCOBOTTask'),
+        },
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log('RB1500 QueryCOBOTTask response:', responseText);
+      const machineResult = parseMachineResult(responseText);
+
+      // Only the flat identifying fields are pulled out individually — the
+      // rest of the task (MedicineList/MedicineItem, nested) is left in
+      // innerXml for the caller to read, same as queryBasketFromRB1500 does,
+      // since extractTagValues only handles flat repeated tags cleanly.
+      const taskNo = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'TaskNo')[0]
+        : undefined;
+      const preHisId = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'PreHisId')[0]
+        : undefined;
+      const preId = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'PreId')[0]
+        : undefined;
+      const basketId = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'BasketId')[0]
+        : undefined;
+      const splitId = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'SplitId')[0]
+        : undefined;
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched COBOT task for ${cobotId}`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        taskNo,
+        preHisId,
+        preId,
+        basketId,
+        splitId,
+        innerXml: machineResult.innerXml,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope queryCobotTaskFromRB1500 would send,
+  // without actually sending it — reuses the same private builder so the
+  // preview shown to the user before confirming can never drift from the
+  // real call.
+  buildSoapEnvelopeForQueryCobotTaskPreview(
+    machineId: number,
+    cobotId: string,
+  ): string {
+    return this.buildSoapEnvelopeForQueryCobotTaskRB1500(machineId, cobotId);
+  }
+
+  private buildSoapEnvelopeForQueryCobotTaskRB1500(
+    machineId: number,
+    cobotId: string,
+  ) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const taskXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(machineId)}</MachineId>
+<CobotId>${escapeXml(cobotId)}</CobotId>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:QueryCOBOTTask xmlns:tns="http://tempuri.org/">
+      <tns:str><![CDATA[${taskXml}]]></tns:str>
+    </tns:QueryCOBOTTask>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // Bulk query — unlike queryBasketFromRB1500 (one prescription at a time),
+  // this asks for every basket that's moved within the last `withinTime`
+  // seconds in one call (spec recommends 300s / 5 min, polled every 5s if
+  // you were polling continuously — this backend only calls it on-demand,
+  // from a "Fetch live position" button on Process Tracking, not on a
+  // timer). Read-only, no database reads or writes here — the frontend
+  // matches each BasketItem.preNo against its own tracked prescriptionhisid
+  // itself rather than this backend trying to reconcile the two.
+  async queryBasketPositionFromRB1500(withinTimeSeconds: number) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'RB1500');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        items: [] as BasketPositionItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml =
+      this.buildSoapEnvelopeForQueryBasketPositionRB1500(withinTimeSeconds);
+    console.log('RB1500 QueryBasketPosition XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: {
+          'Content-Type': buildSoapContentType('QueryBasketPosition'),
+        },
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log('RB1500 QueryBasketPosition response:', responseText);
+      const machineResult = parseMachineResult(responseText);
+
+      const items: BasketPositionItem[] = machineResult.innerXml
+        ? extractRepeatedBlocks(machineResult.innerXml, 'BasketItem').map(
+            (block) => {
+              const position = extractTagValues(block, 'Position')[0];
+              return {
+                basketId: extractTagValues(block, 'BasketId')[0],
+                preNo: extractTagValues(block, 'PreNo')[0],
+                splitNo: extractTagValues(block, 'SplitNo')[0],
+                position: position !== undefined ? Number(position) : undefined,
+                lastTime: extractTagValues(block, 'LastTime')[0],
+              };
+            },
+          )
+        : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched position for ${items.length} basket(s)`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        items,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        items: [] as BasketPositionItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope queryBasketPositionFromRB1500 would send,
+  // without actually sending it — reuses the same private builder so the
+  // preview shown to the user before confirming can never drift from the
+  // real call.
+  buildSoapEnvelopeForQueryBasketPositionPreview(
+    withinTimeSeconds: number,
+  ): string {
+    return this.buildSoapEnvelopeForQueryBasketPositionRB1500(
+      withinTimeSeconds,
+    );
+  }
+
+  private buildSoapEnvelopeForQueryBasketPositionRB1500(
+    withinTimeSeconds: number,
+  ) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const positionXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<WithinTime>${escapeXml(withinTimeSeconds)}</WithinTime>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:QueryBasketPosition xmlns:tns="http://tempuri.org/">
+      <tns:str><![CDATA[${positionXml}]]></tns:str>
+    </tns:QueryBasketPosition>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // Tells RB1500 a COBOT has finished (or failed) working on a task — this is
+  // what actually lets RB1500 carry the basket onward past the COBOT
+  // station, the software counterpart of "the physical arm is done, go
+  // ahead." Same inner-document shape as queryCobotTaskFromRB1500 (Root/
+  // Body/..., utf-16 declared, CDATA-wrapped inside <tns:str>), plus the
+  // task outcome fields. Unlike QueryCOBOTTask, the response carries no
+  // DataTable — just Result/Error, same shape as ExecEliminatePrescription.
+  // Not wired into any database state yet — machine-only call for now.
+  async updateCobotTaskOnRB1500(input: UpdateCobotTaskInput) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'RB1500');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForUpdateCobotTaskRB1500(input);
+    console.log('RB1500 UpdateCOBOTTask XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: {
+          'Content-Type': buildSoapContentType('UpdateCOBOTTask'),
+        },
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log('RB1500 UpdateCOBOTTask response:', responseText);
+      const machineResult = parseMachineResult(responseText);
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Updated task ${input.taskNo} to state ${input.taskState}`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        raw: responseText,
+        updatedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope updateCobotTaskOnRB1500 would send,
+  // without actually sending it — reuses the same private builder so the
+  // preview shown to the user before confirming can never drift from the
+  // real call.
+  buildSoapEnvelopeForUpdateCobotTaskPreview(
+    input: UpdateCobotTaskInput,
+  ): string {
+    return this.buildSoapEnvelopeForUpdateCobotTaskRB1500(input);
+  }
+
+  private buildSoapEnvelopeForUpdateCobotTaskRB1500(
+    input: UpdateCobotTaskInput,
+  ) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const taskXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(input.machineId)}</MachineId>
+<CobotId>${escapeXml(input.cobotId)}</CobotId>
+<TaskNo>${escapeXml(input.taskNo)}</TaskNo>
+<TaskState>${escapeXml(input.taskState)}</TaskState>
+<TaskErrorId>${escapeXml(input.taskErrorId ?? 0)}</TaskErrorId>
+<TaskMessage>${escapeXml(input.taskMessage ?? '')}</TaskMessage>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:UpdateCOBOTTask xmlns:tns="http://tempuri.org/">
+      <tns:str><![CDATA[${taskXml}]]></tns:str>
+    </tns:UpdateCOBOTTask>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
   // Tells the machine that a prescription's pharmacist recheck is done — the
-  // real-world counterpart of Machine Sim's station 6 (Pharmacist Recheck).
+  // real-world counterpart of Machine Sim's station 7 (Pharmacist Recheck).
   // Calling this is expected to clear that prescriptionhisid out of the
   // machine's own "ready" queue (see queryReadyPrescriptionsFromRB1500), so
   // it must only be called once recheck is genuinely complete — NOT wired
