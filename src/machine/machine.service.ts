@@ -1,12 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  buildNzp360Headers,
   buildSoapContentType,
   escapeXml,
   extractRepeatedBlocks,
   extractTagValues,
   getMachineTarget,
   parseMachineResult,
+  unescapeXmlEntities,
 } from '../common/soap.util';
 
 // Machine-only calls that don't belong to any single business entity
@@ -38,6 +40,42 @@ export type BasketPositionItem = {
   splitNo?: string;
   position?: number;
   lastTime?: string;
+};
+
+// Mirrors QueryInventory's <InventoryItem> fields. IsShortage is kept as the
+// raw '0'/'1' string from the machine rather than coerced to boolean here —
+// let the frontend decide how to render it, same as the other RB1500 fields
+// in this file.
+export type InventoryItem = {
+  locationCode?: string;
+  medHisId?: string;
+  medName?: string;
+  medSpecs?: string;
+  medFactory?: string;
+  medUnit?: string;
+  currentQuantity?: string;
+  maximumQuantity?: string;
+  shortagePercentage?: string;
+  isShortage?: string;
+};
+
+// Mirrors NZP360's QueryPackagedInfo <PackagedItem>/<PackagedMedItem> fields
+// (ATDPS doc §3.7.1) — one packaged pouch, with the medicines packed into
+// it. See queryPackagedInfoFromNZP360.
+export type PackagedMedItem = {
+  medCode?: string;
+  medNumber?: string;
+  nursingCode?: string;
+};
+
+export type PackagedItem = {
+  packId?: string;
+  patId?: string;
+  exeTime?: string;
+  orderNo?: string;
+  orderPre?: string;
+  deptCode?: string;
+  medList: PackagedMedItem[];
 };
 
 @Injectable()
@@ -330,6 +368,350 @@ export class MachineService {
 </soap12:Envelope>`;
   }
 
+  // NZP360's QueryMachineState (ATDPS doc §3.6) — same Root/Body/MachineId/
+  // Timestamp input as RB1500's above, but its response additionally carries
+  // a PartList/PartItem breakdown (PartName/PartId/PartState/PartMessage)
+  // that RB1500's QueryMachineState doesn't have — parsed with
+  // extractRepeatedBlocks the same way QueryInventory's InventoryItem list
+  // is. Not yet confirmed against the real machine (sample envelope only).
+  async getMachineStatusFromNZP360(machineId: number) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'NZP360');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForGetMachineStatusNZP360(machineId);
+    console.log('NZP360 QueryMachineState XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: buildNzp360Headers(this.config, 'QueryMachineState'),
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log(
+        'NZP360 QueryMachineState response:',
+        unescapeXmlEntities(responseText),
+      );
+      const machineResult = parseMachineResult(responseText);
+
+      const machineState = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'MachineState')[0]
+        : undefined;
+      const machineMessage = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'MachineMessage')[0]
+        : undefined;
+      const parts = machineResult.innerXml
+        ? extractRepeatedBlocks(machineResult.innerXml, 'PartItem').map(
+            (block) => ({
+              partName: extractTagValues(block, 'PartName')[0],
+              partId: extractTagValues(block, 'PartId')[0],
+              partState: extractTagValues(block, 'PartState')[0],
+              partMessage: extractTagValues(block, 'PartMessage')[0],
+            }),
+          )
+        : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched status for machine ${machineId}`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        machineState,
+        machineMessage,
+        parts,
+        innerXml: machineResult.innerXml,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope getMachineStatusFromNZP360 would send,
+  // without actually sending it — same preview-before-send pattern as
+  // buildSoapEnvelopeForGetMachineStatusPreview above.
+  buildSoapEnvelopeForGetMachineStatusNZP360Preview(machineId: number): string {
+    return this.buildSoapEnvelopeForGetMachineStatusNZP360(machineId);
+  }
+
+  private buildSoapEnvelopeForGetMachineStatusNZP360(machineId: number) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const statusXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(machineId)}</MachineId>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:QueryMachineState xmlns:tns="RssServer">
+      <tns:str><![CDATA[${statusXml}]]></tns:str>
+    </tns:QueryMachineState>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // NZP360's QueryPackagedInfo (ATDPS doc §3.7.1) — plays the same role as
+  // RB1500's QueryReadyPrescription: detects which pouches NZP360 has
+  // finished packaging, for the pharmacist to review before acknowledging
+  // via updatePackagedInfoOnNZP360 below. Read-only against the machine, no
+  // database reads/writes here. Each pouch's nested MedList/PackagedMedItem
+  // is parsed the same way QueryInventory's InventoryItem list is (via
+  // extractRepeatedBlocks), run once more within each PackagedItem block to
+  // pull out its medicines. Not yet confirmed against the real machine
+  // (sample envelope only).
+  async queryPackagedInfoFromNZP360(machineId: number) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'NZP360');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        pouches: [] as PackagedItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForQueryPackagedInfoNZP360(machineId);
+    console.log('NZP360 QueryPackagedInfo XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: buildNzp360Headers(this.config, 'QueryPackagedInfo'),
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log(
+        'NZP360 QueryPackagedInfo response:',
+        unescapeXmlEntities(responseText),
+      );
+      const machineResult = parseMachineResult(responseText);
+
+      const pouches: PackagedItem[] = machineResult.innerXml
+        ? extractRepeatedBlocks(machineResult.innerXml, 'PackagedItem').map(
+            (block) => ({
+              packId: extractTagValues(block, 'PackId')[0],
+              patId: extractTagValues(block, 'PatId')[0],
+              exeTime: extractTagValues(block, 'ExeTime')[0],
+              orderNo: extractTagValues(block, 'OrderNo')[0],
+              orderPre: extractTagValues(block, 'OrderPre')[0],
+              deptCode: extractTagValues(block, 'DeptCode')[0],
+              medList: extractRepeatedBlocks(block, 'PackagedMedItem').map(
+                (medBlock) => ({
+                  medCode: extractTagValues(medBlock, 'MedCode')[0],
+                  medNumber: extractTagValues(medBlock, 'MedNumber')[0],
+                  nursingCode: extractTagValues(medBlock, 'NursingCode')[0],
+                }),
+              ),
+            }),
+          )
+        : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched ${pouches.length} packaged pouch(es)`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        pouches,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        pouches: [] as PackagedItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope queryPackagedInfoFromNZP360 would send,
+  // without actually sending it — same preview-before-send pattern as the
+  // other NZP360/RB1500 query builders.
+  buildSoapEnvelopeForQueryPackagedInfoNZP360Preview(
+    machineId: number,
+  ): string {
+    return this.buildSoapEnvelopeForQueryPackagedInfoNZP360(machineId);
+  }
+
+  private buildSoapEnvelopeForQueryPackagedInfoNZP360(machineId: number) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const packagedXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(machineId)}</MachineId>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:QueryPackagedInfo xmlns:tns="RssServer">
+      <tns:str><![CDATA[${packagedXml}]]></tns:str>
+    </tns:QueryPackagedInfo>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // NZP360's UpdatePackagedInfo (ATDPS doc §3.7.2) — QueryPackagedInfo's
+  // write counterpart: acknowledges/filters one or more pouches by PackId
+  // (the pharmacist reviewing QueryPackagedInfo's list decides which are
+  // done being checked). Response carries no DataTable, just Result/Error —
+  // same shape as RB1500's ExecEliminatePrescription. Not wired into any
+  // database state (machine-only call, same as the other machine-only
+  // actions in this file). Not yet confirmed against the real machine
+  // (sample envelope only).
+  async updatePackagedInfoOnNZP360(machineId: number, packIds: string[]) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'NZP360');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForUpdatePackagedInfoNZP360(
+      machineId,
+      packIds,
+    );
+    console.log('NZP360 UpdatePackagedInfo XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: buildNzp360Headers(this.config, 'UpdatePackagedInfo'),
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log(
+        'NZP360 UpdatePackagedInfo response:',
+        unescapeXmlEntities(responseText),
+      );
+      const machineResult = parseMachineResult(responseText);
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Filtered ${packIds.length} packaged pouch(es)`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        raw: responseText,
+        updatedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope updatePackagedInfoOnNZP360 would send,
+  // without actually sending it — same preview-before-send pattern as the
+  // other NZP360/RB1500 write builders.
+  buildSoapEnvelopeForUpdatePackagedInfoPreview(
+    machineId: number,
+    packIds: string[],
+  ): string {
+    return this.buildSoapEnvelopeForUpdatePackagedInfoNZP360(
+      machineId,
+      packIds,
+    );
+  }
+
+  private buildSoapEnvelopeForUpdatePackagedInfoNZP360(
+    machineId: number,
+    packIds: string[],
+  ) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const packItemsXml = packIds
+      .map(
+        (packId) =>
+          `<PackItem><PackId>${escapeXml(packId)}</PackId></PackItem>`,
+      )
+      .join('');
+
+    const updateXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(machineId)}</MachineId>
+<PackList>${packItemsXml}</PackList>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:UpdatePackagedInfo xmlns:tns="RssServer">
+      <tns:str><![CDATA[${updateXml}]]></tns:str>
+    </tns:UpdatePackagedInfo>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
   // Asks RB1500 which task a given COBOT should work on next — read-only
   // against the machine, no database reads or writes here, same as the other
   // RB1500 query methods. Same inner-document shape as QueryMachineState
@@ -570,6 +952,251 @@ export class MachineService {
     <tns:QueryBasketPosition xmlns:tns="http://tempuri.org/">
       <tns:str><![CDATA[${positionXml}]]></tns:str>
     </tns:QueryBasketPosition>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // Asks RB1500 for its current medication inventory — read-only, no
+  // database reads or writes here. operation: 1 query shortage inventory,
+  // 2 query inventory summary, 3 query inventory details (see spec).
+  async queryInventoryFromRB1500(machineId: number, operation: number) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'RB1500');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        items: [] as InventoryItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForQueryInventoryRB1500(
+      machineId,
+      operation,
+    );
+    console.log('RB1500 QueryInventory XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: {
+          'Content-Type': buildSoapContentType('QueryInventory'),
+        },
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log('RB1500 QueryInventory response:', responseText);
+      const machineResult = parseMachineResult(responseText);
+
+      const items: InventoryItem[] = machineResult.innerXml
+        ? extractRepeatedBlocks(machineResult.innerXml, 'InventoryItem').map(
+            (block) => ({
+              locationCode: extractTagValues(block, 'LocationCode')[0],
+              medHisId: extractTagValues(block, 'MedHisId')[0],
+              medName: extractTagValues(block, 'MedName')[0],
+              medSpecs: extractTagValues(block, 'MedSpecs')[0],
+              medFactory: extractTagValues(block, 'MedFactory')[0],
+              medUnit: extractTagValues(block, 'MedUnit')[0],
+              currentQuantity: extractTagValues(block, 'CurrentQuantity')[0],
+              maximumQuantity: extractTagValues(block, 'MaximumQuantity')[0],
+              shortagePercentage: extractTagValues(
+                block,
+                'ShortagePercentage',
+              )[0],
+              isShortage: extractTagValues(block, 'IsShortage')[0],
+            }),
+          )
+        : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched inventory for ${items.length} medicine(s)`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        items,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        items: [] as InventoryItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope queryInventoryFromRB1500 would send,
+  // without actually sending it — reuses the same private builder so the
+  // preview shown to the user before confirming can never drift from the
+  // real call.
+  buildSoapEnvelopeForQueryInventoryPreview(
+    machineId: number,
+    operation: number,
+  ): string {
+    return this.buildSoapEnvelopeForQueryInventoryRB1500(machineId, operation);
+  }
+
+  private buildSoapEnvelopeForQueryInventoryRB1500(
+    machineId: number,
+    operation: number,
+  ) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const inventoryXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(machineId)}</MachineId>
+<Operation>${escapeXml(operation)}</Operation>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:QueryInventory xmlns:tns="http://tempuri.org/">
+      <tns:str><![CDATA[${inventoryXml}]]></tns:str>
+    </tns:QueryInventory>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // NZP360's QueryInventory (ATDPS integration doc §3.5) — same Root/Body/
+  // MachineId/Operation/Timestamp input and InventoryList/InventoryItem
+  // output shape as RB1500's QueryInventory above (field names identical),
+  // just a different machine/envelope namespace. operation: 1 query shortage
+  // inventory, 2 query inventory summary, 3 query inventory details. Not yet
+  // confirmed against the real machine (sample envelope only).
+  async queryInventoryFromNZP360(machineId: number, operation: number) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'NZP360');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        items: [] as InventoryItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForQueryInventoryNZP360(
+      machineId,
+      operation,
+    );
+    console.log('NZP360 QueryInventory XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: buildNzp360Headers(this.config, 'QueryInventory'),
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log(
+        'NZP360 QueryInventory response:',
+        unescapeXmlEntities(responseText),
+      );
+      const machineResult = parseMachineResult(responseText);
+
+      const items: InventoryItem[] = machineResult.innerXml
+        ? extractRepeatedBlocks(machineResult.innerXml, 'InventoryItem').map(
+            (block) => ({
+              locationCode: extractTagValues(block, 'LocationCode')[0],
+              medHisId: extractTagValues(block, 'MedHisId')[0],
+              medName: extractTagValues(block, 'MedName')[0],
+              medSpecs: extractTagValues(block, 'MedSpecs')[0],
+              medFactory: extractTagValues(block, 'MedFactory')[0],
+              medUnit: extractTagValues(block, 'MedUnit')[0],
+              currentQuantity: extractTagValues(block, 'CurrentQuantity')[0],
+              maximumQuantity: extractTagValues(block, 'MaximumQuantity')[0],
+              shortagePercentage: extractTagValues(
+                block,
+                'ShortagePercentage',
+              )[0],
+              isShortage: extractTagValues(block, 'IsShortage')[0],
+            }),
+          )
+        : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched inventory for ${items.length} medicine(s)`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        items,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        items: [] as InventoryItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope queryInventoryFromNZP360 would send,
+  // without actually sending it — same preview-before-send pattern as
+  // buildSoapEnvelopeForQueryInventoryPreview above.
+  buildSoapEnvelopeForQueryInventoryNZP360Preview(
+    machineId: number,
+    operation: number,
+  ): string {
+    return this.buildSoapEnvelopeForQueryInventoryNZP360(machineId, operation);
+  }
+
+  private buildSoapEnvelopeForQueryInventoryNZP360(
+    machineId: number,
+    operation: number,
+  ) {
+    const now = new Date();
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+
+    const inventoryXml = `<?xml version="1.0" encoding="utf-16"?>
+<Root>
+<Body>
+<MachineId>${escapeXml(machineId)}</MachineId>
+<Operation>${escapeXml(operation)}</Operation>
+<Timestamp>${escapeXml(timestamp)}</Timestamp>
+</Body>
+</Root>`;
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:QueryInventory xmlns:tns="RssServer">
+      <tns:str><![CDATA[${inventoryXml}]]></tns:str>
+    </tns:QueryInventory>
   </soap12:Body>
 </soap12:Envelope>`;
   }

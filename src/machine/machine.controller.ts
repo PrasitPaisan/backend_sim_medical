@@ -102,6 +102,32 @@ export class MachineController {
     );
   }
 
+  // NZP360 counterparts of the two endpoints above — see
+  // MachineService.getMachineStatusFromNZP360.
+  @Get('status-nzp360/preview')
+  getMachineStatusNzp360Preview(@Query('machineId') machineId?: string) {
+    if (!machineId) {
+      throw new BadRequestException('machineId is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForGetMachineStatusNZP360Preview(
+        Number(machineId),
+      ),
+    };
+  }
+
+  @Get('status-nzp360')
+  async getMachineStatusNzp360(@Query('machineId') machineId?: string) {
+    if (!machineId) {
+      throw new BadRequestException('machineId is required');
+    }
+
+    return await this.machineService.getMachineStatusFromNZP360(
+      Number(machineId),
+    );
+  }
+
   // Lets the UI show the exact SOAP body before confirming a QueryCOBOTTask
   // call — no machine call, purely a preview of what /query-cobot-task would
   // transmit for this machineId/cobotId.
@@ -156,6 +182,121 @@ export class MachineController {
   async queryBasketPosition(@Query('withinTime') withinTime?: string) {
     return await this.machineService.queryBasketPositionFromRB1500(
       withinTime ? Number(withinTime) : 300,
+    );
+  }
+
+  // Lets the UI show the exact SOAP body before confirming a QueryInventory
+  // call — no machine call, purely a preview of what /query-inventory would
+  // transmit for this machineId/operation.
+  @Get('query-inventory/preview')
+  queryInventoryPreview(
+    @Query('machineId') machineId?: string,
+    @Query('operation') operation?: string,
+  ) {
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryInventoryPreview(
+        machineId ? Number(machineId) : 1,
+        operation ? Number(operation) : 1,
+      ),
+    };
+  }
+
+  // operation: 1 query shortage inventory, 2 query inventory summary, 3
+  // query inventory details (see MachineService.queryInventoryFromRB1500).
+  @Get('query-inventory')
+  async queryInventory(
+    @Query('machineId') machineId?: string,
+    @Query('operation') operation?: string,
+  ) {
+    return await this.machineService.queryInventoryFromRB1500(
+      machineId ? Number(machineId) : 1,
+      operation ? Number(operation) : 1,
+    );
+  }
+
+  // NZP360 counterparts of the two endpoints above — same field shapes, see
+  // MachineService.queryInventoryFromNZP360.
+  @Get('query-inventory-nzp360/preview')
+  queryInventoryNzp360Preview(
+    @Query('machineId') machineId?: string,
+    @Query('operation') operation?: string,
+  ) {
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryInventoryNZP360Preview(
+        machineId ? Number(machineId) : 1,
+        operation ? Number(operation) : 1,
+      ),
+    };
+  }
+
+  @Get('query-inventory-nzp360')
+  async queryInventoryNzp360(
+    @Query('machineId') machineId?: string,
+    @Query('operation') operation?: string,
+  ) {
+    return await this.machineService.queryInventoryFromNZP360(
+      machineId ? Number(machineId) : 1,
+      operation ? Number(operation) : 1,
+    );
+  }
+
+  // Lets the UI show the exact SOAP body before confirming a
+  // QueryPackagedInfo call — no machine call, purely a preview of what
+  // /query-packaged-info-nzp360 would transmit for this machineId.
+  @Get('query-packaged-info-nzp360/preview')
+  queryPackagedInfoNzp360Preview(@Query('machineId') machineId?: string) {
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryPackagedInfoNZP360Preview(
+        machineId ? Number(machineId) : 1,
+      ),
+    };
+  }
+
+  // Plays the same role as query-ready for RB1500 — detects which pouches
+  // NZP360 has finished packaging (see MachineService.queryPackagedInfoFromNZP360).
+  @Get('query-packaged-info-nzp360')
+  async queryPackagedInfoNzp360(@Query('machineId') machineId?: string) {
+    return await this.machineService.queryPackagedInfoFromNZP360(
+      machineId ? Number(machineId) : 1,
+    );
+  }
+
+  // Lets the UI show the exact SOAP body before confirming an
+  // UpdatePackagedInfo call — no machine call, purely a preview of what
+  // /update-packaged-info-nzp360 would transmit for these packIds.
+  @Post('update-packaged-info-nzp360/preview')
+  updatePackagedInfoNzp360Preview(
+    @Body() body: { machineId?: number; packIds?: string[] },
+  ) {
+    const { machineId, packIds } = body ?? {};
+    if (!packIds || packIds.length === 0) {
+      throw new BadRequestException('packIds is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForUpdatePackagedInfoPreview(
+        machineId ? Number(machineId) : 1,
+        packIds,
+      ),
+    };
+  }
+
+  // Real machine call, so POST — acknowledges/filters the given pouches on
+  // NZP360, standing in for the pharmacist marking them checked (see
+  // MachineService.updatePackagedInfoOnNZP360). Not wired into any database
+  // state yet — machine-only call, same as update-ready-state.
+  @Post('update-packaged-info-nzp360')
+  async updatePackagedInfoNzp360(
+    @Body() body: { machineId?: number; packIds?: string[] },
+  ) {
+    const { machineId, packIds } = body ?? {};
+    if (!packIds || packIds.length === 0) {
+      throw new BadRequestException('packIds is required');
+    }
+
+    return await this.machineService.updatePackagedInfoOnNZP360(
+      machineId ? Number(machineId) : 1,
+      packIds,
     );
   }
 

@@ -6,10 +6,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
 import {
-  buildSoapContentType,
+  buildNzp360Headers,
   escapeXml,
   getMachineTarget,
   parseMachineResult,
+  unescapeXmlEntities,
 } from '../common/soap.util';
 import { createPool } from '../common/db.util';
 
@@ -156,15 +157,16 @@ export class DepartmentsService implements OnModuleDestroy {
     try {
       const response = await fetch(machineTarget, {
         method: 'POST',
-        headers: {
-          'Content-Type': buildSoapContentType('SendDeptInfo', 'RssServer'),
-        },
+        headers: buildNzp360Headers(this.config, 'SendDeptInfo'),
         body: xml,
       });
 
       // The machine replies HTTP 200 even on failure — the real outcome is in the body.
       const responseText = await response.text();
-      console.log('NZP360 SendDeptInfo response:', responseText);
+      console.log(
+        'NZP360 SendDeptInfo response:',
+        unescapeXmlEntities(responseText),
+      );
       const machineResult = parseMachineResult(responseText);
 
       return {

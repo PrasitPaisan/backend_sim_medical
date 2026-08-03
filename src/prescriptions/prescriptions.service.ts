@@ -2,10 +2,12 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
 import {
+  buildNzp360Headers,
   buildSoapContentType,
   escapeXml,
   getMachineTarget,
   parseMachineResult,
+  unescapeXmlEntities,
 } from '../common/soap.util';
 import { createPool } from '../common/db.util';
 import { BasketsService } from '../baskets/baskets.service';
@@ -536,10 +538,6 @@ export class PrescriptionsService implements OnModuleDestroy {
     };
   }
 
-  async sendToRB1500(prescription: any, destination: string) {
-    return this.sendBatchToMachines([prescription], destination);
-  }
-
   // Binds a basket to a prescription *before* dispatching it, then sends TWO
   // SOAP calls: RB1500 always gets every medicine line item; NZP360 only
   // gets the subset with dispense_type = 'nzp360' (skipped entirely if there
@@ -757,16 +755,14 @@ export class PrescriptionsService implements OnModuleDestroy {
         );
         nzp360Response = await fetch(nzp360Target, {
           method: 'POST',
-          headers: {
-            'Content-Type': buildSoapContentType(
-              'SendPrescription',
-              'RssServer',
-            ),
-          },
+          headers: buildNzp360Headers(this.config, 'SendPrescription'),
           body: nzp360Xml,
         });
         nzp360ResponseText = await nzp360Response.text();
-        console.log('NZP360 SendPrescription response:', nzp360ResponseText);
+        console.log(
+          'NZP360 SendPrescription response:',
+          unescapeXmlEntities(nzp360ResponseText),
+        );
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'Unknown error';
@@ -1092,12 +1088,7 @@ export class PrescriptionsService implements OnModuleDestroy {
         );
         response = await fetch(nzp360Target as string, {
           method: 'POST',
-          headers: {
-            'Content-Type': buildSoapContentType(
-              'SendPrescription',
-              'RssServer',
-            ),
-          },
+          headers: buildNzp360Headers(this.config, 'SendPrescription'),
           body: xml,
         });
         responseText = await response.text();

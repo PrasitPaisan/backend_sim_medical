@@ -73,14 +73,6 @@ export class PrescriptionsController {
     return this.prescriptionsService.receivePrescriptions(body);
   }
 
-  @Post('send')
-  async send(@Body() body: { prescription?: any; destination?: string }) {
-    return this.prescriptionsService.sendToRB1500(
-      body?.prescription ?? body,
-      body?.destination ?? 'robot-a',
-    );
-  }
-
   // Lets the UI show the exact SOAP body(ies) before the user confirms
   // sending — no machine call, no basket binding, no database write, purely
   // a preview of what /send-batch would transmit for each prescription.

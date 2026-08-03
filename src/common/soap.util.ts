@@ -22,6 +22,35 @@ export function getMachineTarget(
   return configuredPath;
 }
 
+// NZP360's ATDPS integration doc requires every call (unlike RB1500) to
+// carry a `Token` header, obtained from a separate login call whose spec
+// isn't documented yet — MACHINE_TOKEN_NZP360 is a placeholder env var to
+// fill in once that's available. Unlike getMachineTarget, a missing token
+// doesn't throw: it's expected to be empty for now, and the header is
+// simply omitted (the real machine will presumably reject the call with its
+// own auth error, which surfaces the same way any other machine rejection
+// already does).
+export function getMachineToken(config: ConfigService): string | undefined {
+  return config.get<string>('MACHINE_TOKEN_NZP360') || undefined;
+}
+
+// Builds the full header set for an NZP360 call in one place — Content-Type
+// (still folded-action SOAP 1.2, matching RB1500's confirmed convention,
+// not the SOAP 1.1 + separate SOAPAction header the ATDPS doc's captured
+// examples happen to show, since ASMX services normally answer both SOAP
+// versions and there's no evidence yet that 1.2 doesn't work here — see the
+// CLAUDE.md note this decision came with) plus Token if configured.
+export function buildNzp360Headers(
+  config: ConfigService,
+  operation: string,
+): Record<string, string> {
+  const token = getMachineToken(config);
+  return {
+    'Content-Type': buildSoapContentType(operation, 'RssServer'),
+    ...(token ? { Token: token } : {}),
+  };
+}
+
 export function escapeXml(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -31,7 +60,15 @@ export function escapeXml(value: unknown): string {
     .replace(/'/g, '&apos;');
 }
 
-function unescapeXmlEntities(value: string): string {
+// Exported for debug logging — the machine's response often wraps its real
+// content in HTML-entity-escaped text (e.g. NZP360's QueryInventory returns
+// <QueryInventoryResult>&lt;![CDATA[&lt;?xml...&gt;...]]&gt;</QueryInventoryResult>,
+// same idea as RB1500 wrapping its DataTable in literal "<![CDATA[" text —
+// see the SOAP structures note in CLAUDE.md). parseMachineResult already
+// unescapes this once it extracts the <XxxResult> body; callers that want a
+// human-readable console.log of the *raw* response before parsing can run
+// it through this directly.
+export function unescapeXmlEntities(value: string): string {
   return value
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
