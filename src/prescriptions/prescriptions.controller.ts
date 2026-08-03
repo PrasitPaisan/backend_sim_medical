@@ -18,25 +18,40 @@ export class PrescriptionsController {
   ) {}
 
   // Received, not yet sent (pre_state = -1) — Prescription Managements.
+  // nzp360SentOnly narrows this to prescriptions already split-sent to
+  // NZP360 alone (nzp360_sent_at set) but still waiting on RB1500 — lets the
+  // pharmacist find these without scanning every page for the "Sent to
+  // NZP360" tag, since they can otherwise land anywhere in the list.
   @Get()
   async list(
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
+    @Query('nzp360SentOnly') nzp360SentOnly?: string,
   ) {
     return this.prescriptionsService.findAll(
       page ? Number(page) : 1,
       pageSize ? Number(pageSize) : 50,
+      nzp360SentOnly === 'true',
     );
   }
 
   // Bulk-select support for Prescription Managements: returns just the ids
   // of the first `limit` prescriptions in the same order findAll uses, so
   // the UI can select e.g. "first 100" across pages without fetching every
-  // prescription's full medicine details.
+  // prescription's full medicine details. nzp360SentOnly must mirror
+  // whatever filter the list itself is currently under (see findAll) —
+  // otherwise "select first N" while the NZP360-sent filter is active would
+  // silently pull in unfiltered ids the pharmacist can't even see on screen.
   @Get('ids')
-  async ids(@Query('limit') limit?: string) {
+  async ids(
+    @Query('limit') limit?: string,
+    @Query('nzp360SentOnly') nzp360SentOnly?: string,
+  ) {
     const parsedLimit = limit ? Number(limit) : 100;
-    return this.prescriptionsService.findIds(parsedLimit);
+    return this.prescriptionsService.findIds(
+      parsedLimit,
+      nzp360SentOnly === 'true',
+    );
   }
 
   // Backfills full prescription + medicine data for ids the browser doesn't

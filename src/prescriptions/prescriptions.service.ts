@@ -95,7 +95,7 @@ export class PrescriptionsService implements OnModuleDestroy {
   // is evaluated after GROUP BY but before LIMIT/OFFSET, so it reports the
   // total prescription count unaffected by pagination — one round trip
   // instead of a separate COUNT query.
-  async findAll(page = 1, pageSize = 50) {
+  async findAll(page = 1, pageSize = 50, nzp360SentOnly = false) {
     const safePage = Math.max(1, page);
     const safePageSize = Math.min(200, Math.max(1, pageSize));
     const offset = (safePage - 1) * safePageSize;
@@ -166,6 +166,7 @@ export class PrescriptionsService implements OnModuleDestroy {
           AND md.medicineunit = pd.medunit
           AND md.medfactoryname = pd.medfactoryname
         WHERE ph.pre_state = -1
+          ${nzp360SentOnly ? 'AND ph.nzp360_sent_at IS NOT NULL' : ''}
         GROUP BY ph.id
         -- Stat order (ph.priority = 1, see frontend_sim/src/lib/orderPriority.ts)
         -- outranks everything else and floats to the top; otherwise
@@ -189,7 +190,7 @@ export class PrescriptionsService implements OnModuleDestroy {
   // item for rows that aren't even on the current page — same ordering as
   // findAll (Stat first, then newest) so "first N" matches what's visibly
   // at the top of the list.
-  async findIds(limit = 100) {
+  async findIds(limit = 100, nzp360SentOnly = false) {
     const safeLimit = Math.min(2000, Math.max(1, limit));
 
     const res = await this.pool.query(
@@ -197,6 +198,7 @@ export class PrescriptionsService implements OnModuleDestroy {
         SELECT ph.id
         FROM prescription_header ph
         WHERE ph.pre_state = -1
+          ${nzp360SentOnly ? 'AND ph.nzp360_sent_at IS NOT NULL' : ''}
         ORDER BY (ph.priority = 1) DESC, ph.id DESC
         LIMIT $1
       `,
