@@ -455,4 +455,67 @@ export class MachineController {
       basketReleased: releaseResult.ok ? releaseResult.basketId : null,
     };
   }
+
+  // Lets the UI show the exact SOAP body before confirming a Nursing call —
+  // no machine call, purely a preview of what /nursing-nzp360 would
+  // transmit for this medbag2DCodeParam1 (the RCPreId part of the drug
+  // bag's KF[MZNO]_[RCPreId] 2D code — see MachineService.nursingFromNZP360).
+  @Get('nursing-nzp360/preview')
+  nursingNzp360Preview(
+    @Query('medbag2DCodeParam1') medbag2DCodeParam1?: string,
+  ) {
+    if (!medbag2DCodeParam1) {
+      throw new BadRequestException('medbag2DCodeParam1 is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForNursingPreview(
+        medbag2DCodeParam1,
+      ),
+    };
+  }
+
+  // NZP360's Nursing Interface 1 (ATDPS doc §3.4.3) — read-only, no database
+  // reads or writes (see MachineService.nursingFromNZP360).
+  @Get('nursing-nzp360')
+  async nursingNzp360(
+    @Query('medbag2DCodeParam1') medbag2DCodeParam1?: string,
+  ) {
+    if (!medbag2DCodeParam1) {
+      throw new BadRequestException('medbag2DCodeParam1 is required');
+    }
+
+    return await this.machineService.nursingFromNZP360(medbag2DCodeParam1);
+  }
+
+  // Lets the UI show the exact SOAP body before confirming a NursingCode
+  // call — no machine call, purely a preview of what /nursing-code-nzp360
+  // would transmit for this medbag2DCodeParam1.
+  @Get('nursing-code-nzp360/preview')
+  nursingCodeNzp360Preview(
+    @Query('medbag2DCodeParam1') medbag2DCodeParam1?: string,
+  ) {
+    if (!medbag2DCodeParam1) {
+      throw new BadRequestException('medbag2DCodeParam1 is required');
+    }
+
+    return {
+      xml: this.machineService.buildSoapEnvelopeForNursingCodePreview(
+        medbag2DCodeParam1,
+      ),
+    };
+  }
+
+  // NZP360's Nursing Interface 2 (ATDPS doc §3.4.4) — read-only, no database
+  // reads or writes (see MachineService.nursingCodeFromNZP360).
+  @Get('nursing-code-nzp360')
+  async nursingCodeNzp360(
+    @Query('medbag2DCodeParam1') medbag2DCodeParam1?: string,
+  ) {
+    if (!medbag2DCodeParam1) {
+      throw new BadRequestException('medbag2DCodeParam1 is required');
+    }
+
+    return await this.machineService.nursingCodeFromNZP360(medbag2DCodeParam1);
+  }
 }

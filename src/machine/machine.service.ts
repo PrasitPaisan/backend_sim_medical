@@ -78,6 +78,31 @@ export type PackagedItem = {
   medList: PackagedMedItem[];
 };
 
+// Mirrors NZP360's Nursing <PrescriptionMedicine> fields (ATDPS doc §3.4.3) —
+// one drug line belonging to the prescription identified by the drug bag's
+// 2D code (KF[MZNO]_[RCPreId] — see nursingFromNZP360). Flat, non-nested, so
+// parsed the same way queryCobotTaskFromRB1500's DataTable fields are.
+export type NursingPrescriptionMedicineItem = {
+  medbag2DCode?: string;
+  deptName?: string;
+  deptCode?: string;
+  bedNo?: string;
+  atfAdministration?: string;
+  doctor?: string;
+  patientId?: string;
+  patientName?: string;
+  patientAge?: string;
+  orderCode?: string;
+  orderText?: string;
+  firmName?: string;
+  orderUnit?: string;
+  typeUnit?: string;
+  medNum?: string;
+  finishTime?: string;
+  doctorName?: string;
+  visitId?: string;
+};
+
 @Injectable()
 export class MachineService {
   constructor(private config: ConfigService) {}
@@ -1476,6 +1501,212 @@ export class MachineService {
     <tns:ExecEliminatePrescription xmlns:tns="http://tempuri.org/">
       <tns:str>${escapeXml(prescriptionhisid)}</tns:str>
     </tns:ExecEliminatePrescription>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // NZP360's Nursing Interface 1 (ATDPS doc §3.4.3) — given a drug bag's 2D
+  // code, returns every PrescriptionMedicine line belonging to it, for a
+  // nurse scanning the bag to see what's inside. medbag2DCodeParam1 is the
+  // RCPreId part of the bag's KF[MZNO]_[RCPreId] code (NOT the full code —
+  // per the doc's field description, e.g. "1000117420" out of
+  // "KF259446_1000117420"). Read-only against the machine, no database reads
+  // or writes here, same as the other NZP360 query methods. Not yet
+  // confirmed against the real machine (doc sample envelope only, and the
+  // doc gives no PostMan test for this one specifically — see
+  // buildSoapEnvelopeForNursingCodeNZP360 below where a PostMan example does
+  // exist and uses a different param tag name).
+  async nursingFromNZP360(medbag2DCodeParam1: string) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'NZP360');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        medications: [] as NursingPrescriptionMedicineItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForNursingNZP360(medbag2DCodeParam1);
+    console.log('NZP360 Nursing XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: buildNzp360Headers(this.config, 'Nursing'),
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log(
+        'NZP360 Nursing response:',
+        unescapeXmlEntities(responseText),
+      );
+      const machineResult = parseMachineResult(responseText);
+
+      const medications: NursingPrescriptionMedicineItem[] =
+        machineResult.innerXml
+          ? extractRepeatedBlocks(
+              machineResult.innerXml,
+              'PrescriptionMedicine',
+            ).map((block) => ({
+              medbag2DCode: extractTagValues(block, 'Medbag2DCode')[0],
+              deptName: extractTagValues(block, 'DEPT_NAME')[0],
+              deptCode: extractTagValues(block, 'DEPT_CODE')[0],
+              bedNo: extractTagValues(block, 'BED_NO')[0],
+              atfAdministration: extractTagValues(
+                block,
+                'ATF_ADMINISTRATION',
+              )[0],
+              doctor: extractTagValues(block, 'DOCTOR')[0],
+              patientId: extractTagValues(block, 'PATIENT_ID')[0],
+              patientName: extractTagValues(block, 'PATIENT_NAME')[0],
+              patientAge: extractTagValues(block, 'PATIENT_AGE')[0],
+              orderCode: extractTagValues(block, 'ORDER_CODE')[0],
+              orderText: extractTagValues(block, 'ORDER_TEXT')[0],
+              firmName: extractTagValues(block, 'FIRM_NAME')[0],
+              orderUnit: extractTagValues(block, 'ORDER_UNIT')[0],
+              typeUnit: extractTagValues(block, 'Type_Unit')[0],
+              medNum: extractTagValues(block, 'med_num')[0],
+              finishTime: extractTagValues(block, 'finish_time')[0],
+              doctorName: extractTagValues(block, 'doctor_name')[0],
+              visitId: extractTagValues(block, 'VISIT_ID')[0],
+            }))
+          : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched ${medications.length} medicine line(s) for ${medbag2DCodeParam1}`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        medications,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        medications: [] as NursingPrescriptionMedicineItem[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope nursingFromNZP360 would send, without
+  // actually sending it — same preview-before-send pattern as the other
+  // NZP360/RB1500 query builders.
+  buildSoapEnvelopeForNursingPreview(medbag2DCodeParam1: string): string {
+    return this.buildSoapEnvelopeForNursingNZP360(medbag2DCodeParam1);
+  }
+
+  private buildSoapEnvelopeForNursingNZP360(medbag2DCodeParam1: string) {
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:Nursing xmlns:tns="RssServer">
+      <tns:Medbag2DCodeParam1>${escapeXml(medbag2DCodeParam1)}</tns:Medbag2DCodeParam1>
+    </tns:Nursing>
+  </soap12:Body>
+</soap12:Envelope>`;
+  }
+
+  // NZP360's Nursing Interface 2 (ATDPS doc §3.4.4) — given the same
+  // RCPreId param as Nursing above, returns the list of nursing codes HIS
+  // has already provided for this drug bag. Read-only against the machine,
+  // no database reads or writes here. The doc's own PostMan Test example
+  // (§3.4.5) uses body tag <Medbag2DCode> rather than the
+  // <Medbag2DCodeParam1> the function signature implies — followed the
+  // PostMan example here since it's the more concrete, directly-testable
+  // artifact (same tradeoff as the doc's other internal inconsistencies
+  // noted elsewhere in this file).
+  async nursingCodeFromNZP360(medbag2DCodeParam1: string) {
+    let machineTarget: string;
+    try {
+      machineTarget = getMachineTarget(this.config, 'NZP360');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget: null,
+        message: `Unable to reach dispensing machine: ${message}`,
+        nursingCodes: [] as string[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+
+    const xml = this.buildSoapEnvelopeForNursingCodeNZP360(medbag2DCodeParam1);
+    console.log('NZP360 NursingCode XML:', xml);
+
+    try {
+      const response = await fetch(machineTarget, {
+        method: 'POST',
+        headers: buildNzp360Headers(this.config, 'NursingCode'),
+        body: xml,
+      });
+
+      // The machine replies HTTP 200 even on failure — the real outcome is in the body.
+      const responseText = await response.text();
+      console.log(
+        'NZP360 NursingCode response:',
+        unescapeXmlEntities(responseText),
+      );
+      const machineResult = parseMachineResult(responseText);
+
+      const nursingCodes = machineResult.innerXml
+        ? extractTagValues(machineResult.innerXml, 'NursingCode')
+        : [];
+
+      return {
+        ok: response.ok && machineResult.success,
+        status: response.status,
+        machineTarget,
+        message: machineResult.success
+          ? `Fetched ${nursingCodes.length} nursing code(s) for ${medbag2DCodeParam1}`
+          : machineResult.error ||
+            `Machine responded with HTTP ${response.status}`,
+        resultCode: machineResult.resultCode,
+        nursingCodes,
+        raw: responseText,
+        queriedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        machineTarget,
+        message,
+        nursingCodes: [] as string[],
+        queriedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  // Builds the exact SOAP envelope nursingCodeFromNZP360 would send, without
+  // actually sending it — same preview-before-send pattern as the other
+  // NZP360/RB1500 query builders.
+  buildSoapEnvelopeForNursingCodePreview(medbag2DCodeParam1: string): string {
+    return this.buildSoapEnvelopeForNursingCodeNZP360(medbag2DCodeParam1);
+  }
+
+  private buildSoapEnvelopeForNursingCodeNZP360(medbag2DCodeParam1: string) {
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <tns:NursingCode xmlns:tns="RssServer">
+      <tns:Medbag2DCode>${escapeXml(medbag2DCodeParam1)}</tns:Medbag2DCode>
+    </tns:NursingCode>
   </soap12:Body>
 </soap12:Envelope>`;
   }
