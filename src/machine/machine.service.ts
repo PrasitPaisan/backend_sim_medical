@@ -29,11 +29,12 @@ export type UpdateCobotTaskInput = {
   taskMessage?: string;
 };
 
-// Position: 0 Idle, 1 Binding card position, 2 Manual replenishment
-// position, 3 NZP360 dispensing position, 4 T type exit, 5 COBOT dispensing
-// position, 6 End — RB1500's own numbering, deliberately NOT the same scale
-// as this backend's basket.station_status (they diverge at 2/3/4), so never
-// map one onto the other. See queryBasketPositionFromRB1500.
+// Position: 1 Binding card position, 2 Manual replenishment position,
+// 3 NZP360 dispensing position, 4 T type exit, 5 COBOT dispensing position —
+// RB1500's own numbering, confirmed to run 1-5 only (the machine does not
+// report Idle/0 or End/6 at all). Deliberately NOT the same scale as this
+// backend's basket.station_status (they diverge at 2/3/4), so never map one
+// onto the other. See queryBasketPositionFromRB1500.
 export type BasketPositionItem = {
   basketId?: string;
   preNo?: string;
@@ -168,6 +169,14 @@ export class MachineService {
         queriedAt: new Date().toISOString(),
       };
     }
+  }
+
+  // Builds the exact SOAP envelope queryReadyPrescriptionsFromRB1500 would
+  // send, without actually sending it — reuses the same private builder so
+  // the preview shown to the user before confirming can never drift from
+  // the real call. Takes no params since the envelope itself is static.
+  buildSoapEnvelopeForQueryReadyPrescriptionPreview(): string {
+    return this.buildSoapEnvelopeForQueryReadyPrescriptionRB1500();
   }
 
   private buildSoapEnvelopeForQueryReadyPrescriptionRB1500() {

@@ -43,6 +43,16 @@ export class MachineController {
     private readonly basketsService: BasketsService,
   ) {}
 
+  // Lets the UI show the exact SOAP body before confirming a
+  // QueryReadyPrescription call — no machine call, purely a preview. Takes
+  // no query params since the envelope itself is static.
+  @Get('query-ready/preview')
+  queryReadyPreview() {
+    return {
+      xml: this.machineService.buildSoapEnvelopeForQueryReadyPrescriptionPreview(),
+    };
+  }
+
   @Get('query-ready')
   async queryReady() {
     return this.machineService.queryReadyPrescriptionsFromRB1500();
@@ -402,6 +412,18 @@ export class MachineController {
       );
 
     return { ...machineResult, confirmed: confirmResult.ok };
+  }
+
+  // Prescriptions already acked via Confirm Dispensing but not yet
+  // Eliminated (basket still bound) — see
+  // BasketsService.findRecheckConfirmedPendingIds. The Pharmacist Recheck UI
+  // merges this into whatever /query-ready's live machine call returns, so a
+  // confirmed prescription stays selectable even if the real machine stops
+  // reporting it in its own ready queue after acknowledgment.
+  @Get('recheck-confirmed-pending')
+  async recheckConfirmedPending() {
+    const ids = await this.basketsService.findRecheckConfirmedPendingIds();
+    return { ids };
   }
 
   // Lets the UI show the exact SOAP body before confirming an

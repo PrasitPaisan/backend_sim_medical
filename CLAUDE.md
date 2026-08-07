@@ -107,6 +107,32 @@ This runs at the very top of all four RB1500-facing entry points — `sendBatchT
 
 **Known limitation (accepted for now):** this only spaces cobot prescriptions out *within a single dispatch call* — it has no memory of a cobot basket still in flight from an earlier, separate send, so two sends done back-to-back could still place cobot baskets close together. Extending this to account for in-flight baskets from prior sends would need real-time gating against `basket.station_status`, which was deliberately deferred.
 
+### Test data for conveyor/COBOT routing coverage: TCV001-TCV015
+
+`prescription_header` rows with `patientname` ending `TCV001` through `TCV015` (`prescriptionhisid` values `MOCK1784910428854`..`MOCK1784910428868`) are a deliberate exhaustive-combination test matrix over the 4 dispensing machines (Manual, RB1500, NZP360, COBOT) — every single machine alone, every pair, every triple, and the full 4-way combo, one prescription each. Each row's `prescriptionhint` states its combination in plain text (e.g. `"Conveyor routing: RB1500 + COBOT"`), confirmed against `prescription_detail`/`medicine_dictionary.dispense_type` live in the local Docker DB:
+
+| patientname suffix | prescriptionhisid | dispense_type(s) covered |
+|---|---|---|
+| TCV001 | MOCK1784910428854 | rb1500 |
+| TCV002 | MOCK1784910428855 | manual |
+| TCV003 | MOCK1784910428856 | nzp360 |
+| TCV004 | MOCK1784910428857 | cobot |
+| TCV005 | MOCK1784910428858 | manual, rb1500 |
+| TCV006 | MOCK1784910428859 | nzp360, rb1500 |
+| TCV007 | MOCK1784910428860 | cobot, rb1500 |
+| TCV008 | MOCK1784910428861 | manual, nzp360 |
+| TCV009 | MOCK1784910428862 | cobot, manual |
+| TCV010 | MOCK1784910428863 | cobot, nzp360 |
+| TCV011 | MOCK1784910428864 | manual, nzp360, rb1500 (no COBOT) |
+| TCV012 | MOCK1784910428865 | cobot, manual, rb1500 (no NZP360) |
+| TCV013 | MOCK1784910428866 | cobot, nzp360, rb1500 (no Manual) |
+| TCV014 | MOCK1784910428867 | cobot, manual, nzp360 (no RB1500) |
+| TCV015 | MOCK1784910428868 | cobot, manual, nzp360, rb1500 (full loop, all 4) |
+
+All 15 were `pre_state = -1` (received, not yet sent) as of 2026-08-07, so ready to send/track through every pipeline station without needing new mock data. A separate, unrelated set (`TCV016`-`TCV035`, `MOCKPOS-32`..`MOCKPOS-51`) simulates realistic multi-drug/multi-day orders with COBOT lines interspersed for routing-coverage spot checks (not an exhaustive combination matrix like TCV001-015) — `TCV035` was already `pre_state = 2` (eliminated) as of the same check.
+
+Distinct from the `TC-CB-RFID-01..15`/`TC-CB-CONC-05..09` prescriptions that exist only inside `backend-sim/docker/dump.sql` (an older snapshot) but are **not** present in the currently running local Docker DB — don't confuse the two naming schemes; TCV001-015 is the one that's actually live and testable right now.
+
 ### Frontend derives UI state from station_status, never stores it separately
 
 `frontend_sim/src/lib/stations.ts` is the only place that maps a raw station number to a label/status (`done`/`active`/`pending`). Two pages read from it:

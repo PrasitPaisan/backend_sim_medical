@@ -168,11 +168,12 @@ export class PrescriptionsService implements OnModuleDestroy {
         WHERE ph.pre_state = -1
           ${nzp360SentOnly ? 'AND ph.nzp360_sent_at IS NOT NULL' : ''}
         GROUP BY ph.id
-        -- Stat order (ph.priority = 1, see frontend_sim/src/lib/orderPriority.ts)
-        -- outranks everything else and floats to the top; otherwise
-        -- newest-created first. Header-level priority, not the per-medicine
-        -- prescription_detail.priority (different field, different scheme).
-        ORDER BY (ph.priority = 1) DESC, ph.id DESC
+        -- Chronological queue order, newest-submitted first — Stat no
+        -- longer jumps the queue here; priority-based ordering was removed
+        -- since it let a Stat prescription's basket be dispatched ahead of
+        -- prescriptions that had been waiting longer, which is not the
+        -- desired queue behavior for Prescription Managements.
+        ORDER BY ph.id DESC
         LIMIT $1 OFFSET $2
       `,
       [safePageSize, offset],
@@ -188,8 +189,8 @@ export class PrescriptionsService implements OnModuleDestroy {
   // Companion to findAll's pagination: lets the UI bulk-select "the first N"
   // prescriptions (e.g. 100 of 2000) without pulling every medicine line
   // item for rows that aren't even on the current page — same ordering as
-  // findAll (Stat first, then newest) so "first N" matches what's visibly
-  // at the top of the list.
+  // findAll (chronological, newest-submitted first) so "first N" matches
+  // what's visibly at the top of the list.
   async findIds(limit = 100, nzp360SentOnly = false) {
     const safeLimit = Math.min(2000, Math.max(1, limit));
 
@@ -199,7 +200,7 @@ export class PrescriptionsService implements OnModuleDestroy {
         FROM prescription_header ph
         WHERE ph.pre_state = -1
           ${nzp360SentOnly ? 'AND ph.nzp360_sent_at IS NOT NULL' : ''}
-        ORDER BY (ph.priority = 1) DESC, ph.id DESC
+        ORDER BY ph.id DESC
         LIMIT $1
       `,
       [safeLimit],

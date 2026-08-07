@@ -213,7 +213,7 @@ export class BasketsService implements OnModuleDestroy {
       }
 
       await client.query(
-        `UPDATE prescription_header SET pre_state = $1, basket_id = NULL, updated_at = NOW() WHERE id = $2`,
+        `UPDATE prescription_header SET pre_state = $1, basket_id = NULL, recheck_confirmed_at = NULL, updated_at = NOW() WHERE id = $2`,
         [ELIMINATED_PRE_STATE, prescriptionId],
       );
 
@@ -240,7 +240,7 @@ export class BasketsService implements OnModuleDestroy {
     prescriptionhisid: string,
   ): Promise<ConfirmRecheckResult> {
     const res = await this.pool.query(
-      `UPDATE prescription_header SET pre_state = 1, updated_at = NOW() WHERE prescriptionhisid = $1 AND pre_state = 0`,
+      `UPDATE prescription_header SET pre_state = 1, recheck_confirmed_at = NOW(), updated_at = NOW() WHERE prescriptionhisid = $1 AND pre_state = 0`,
       [prescriptionhisid],
     );
 
@@ -255,6 +255,20 @@ export class BasketsService implements OnModuleDestroy {
     }
 
     return { ok: true };
+  }
+
+  // Prescriptions the pharmacist has already acked via Confirm Dispensing
+  // (recheck_confirmed_at set) but hasn't Eliminated yet — the basket is
+  // still bound. Whether the real RB1500 keeps reporting an acknowledged
+  // prescription in its own QueryReadyPrescription queue is unconfirmed, so
+  // the Pharmacist Recheck UI merges this list into whatever the machine
+  // reports on each fetch, keeping a confirmed-but-not-eliminated
+  // prescription selectable even if the machine stops reporting it as ready.
+  async findRecheckConfirmedPendingIds(): Promise<string[]> {
+    const res = await this.pool.query(
+      `SELECT prescriptionhisid FROM prescription_header WHERE recheck_confirmed_at IS NOT NULL ORDER BY recheck_confirmed_at ASC`,
+    );
+    return res.rows.map((row) => row.prescriptionhisid as string);
   }
 
   // Simulation-only reset button (Machine Sim): unbinds every basket and
@@ -277,8 +291,8 @@ export class BasketsService implements OnModuleDestroy {
          WHERE prescription_id IS NOT NULL OR station_status <> 0`,
       );
       const prescriptionRes = await client.query(
-        `UPDATE prescription_header SET pre_state = -1, basket_id = NULL, nzp360_sent_at = NULL, updated_at = NOW()
-         WHERE pre_state <> -1 OR basket_id IS NOT NULL OR nzp360_sent_at IS NOT NULL`,
+        `UPDATE prescription_header SET pre_state = -1, basket_id = NULL, nzp360_sent_at = NULL, recheck_confirmed_at = NULL, updated_at = NOW()
+         WHERE pre_state <> -1 OR basket_id IS NOT NULL OR nzp360_sent_at IS NOT NULL OR recheck_confirmed_at IS NOT NULL`,
       );
 
       await client.query('COMMIT');
